@@ -66,12 +66,15 @@ This document provides both the **automated programmatic verification evidence**
 4. Stop speaking for 3.5 seconds:
 5. Observe: Silence auto-stop triggers, Orb enters `Thinking`, inserts text, and returns to `Idle`.
 
-### Scenario 4: Elevated App (UIPI) Protection
+### Scenario 4: Elevated App (UIPI) Protection & Hook Behavior
 1. Open Administrator PowerShell (`Run as Administrator`).
-2. Run Ruby as a standard unelevated user.
-3. Focus elevated PowerShell and hold `Ctrl + Win` to dictate.
-4. Observe: UIPI boundary detected, insertion blocked, and notification displayed:
-   *"Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts."*
+2. Run Ruby as a standard unelevated user (medium integrity).
+3. Focus elevated PowerShell and attempt to press/hold `Ctrl + Win` to dictate.
+4. **Behavior Hypothesis to Verify on Hardware**:
+   - *Hypothesis A (UIPI Hook Suppression)*: Under Windows UIPI security rules, a non-elevated `WH_KEYBOARD_LL` hook running in a medium-integrity process may not receive keyboard messages at all while an elevated (high-integrity) window is in the foreground. If so, `Ctrl+Win` will not trigger Ruby at all.
+   - *Hypothesis B (Hook Receives, SendInput Blocked)*: If `WH_KEYBOARD_LL` receives the chord globally, Ruby's `is_target_window_elevated` check detects the elevated process token, refuses insertion before executing any SendInput/Ctrl+V, and displays the UI toast:
+     *"Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts."*
+   - Verification Goal: Observe whether Hypothesis A or B occurs on this Windows build. If Hypothesis A holds, Ruby must be run as Administrator whenever dictating into elevated administrative windows is desired.
 
 ### Scenario 5: Emergency Kill Switch
 1. Press `Ctrl + Alt + Shift + R` at any time.

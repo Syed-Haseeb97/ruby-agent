@@ -45,6 +45,7 @@ pub struct GeminiDictationClient {
     client: Client,
     model: String,
     explicit_api_key: Option<String>,
+    last_served_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl Default for GeminiDictationClient {
@@ -63,7 +64,13 @@ impl GeminiDictationClient {
             client,
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             explicit_api_key: api_key,
+            last_served_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Returns the model name that successfully served the most recent request.
+    pub fn last_served_model(&self) -> Option<String> {
+        self.last_served_model.lock().ok().and_then(|m| m.clone())
     }
 }
 
@@ -132,7 +139,15 @@ impl DictationClient for GeminiDictationClient {
         }
 
         let mut last_err = GeminiError::Api("No attempts made".to_string());
-        for current_model in &models_to_try {
+        for (model_idx, current_model) in models_to_try.iter().enumerate() {
+            if model_idx > 0 {
+                tracing::warn!(
+                    "Gemini model fallback triggered: primary model '{}' failed; falling back to '{}'",
+                    models_to_try[0],
+                    current_model
+                );
+            }
+
             let url = format!("{}/{}:generateContent", API_BASE_URL, current_model);
 
             debug!(
@@ -180,6 +195,10 @@ impl DictationClient for GeminiDictationClient {
                         .unwrap_or("")
                         .trim()
                         .to_string();
+
+                    if let Ok(mut lock) = self.last_served_model.lock() {
+                        *lock = Some(current_model.clone());
+                    }
 
                     return Ok(text);
                 }
@@ -362,11 +381,32 @@ mod tests {
             .transcribe_and_cleanup(&wav, Some("notepad.exe"))
             .await;
         let latency_ms = t0.elapsed().as_millis();
+        let served_model_1 = client
+            .last_served_model()
+            .unwrap_or_else(|| "unknown".to_string());
         println!(
-            "Live smoke test (tone fixture) completed in {} ms: {:?}",
-            latency_ms, res
+            "Live smoke test (tone fixture) completed in {} ms using model '{}': {:?}",
+            latency_ms, served_model_1, res
         );
         assert!(res.is_ok(), "Live Gemini dictation request must succeed");
+
+        if served_model_1 != "gemini-3.8-flash" {
+            println!(
+                "[FALLBACK DETECTED] Target model 'gemini-3.8-flash' was not served; actual model: '{}'",
+                served_model_1
+            );
+            if std::env::var("ALLOW_GEMINI_FALLBACK").is_err() {
+                panic!(
+                    "Model fallback occurred: primary model 'gemini-3.8-flash' failed and fell back to '{}'. Failing test because ALLOW_GEMINI_FALLBACK environment variable is not set.",
+                    served_model_1
+                );
+            } else {
+                println!(
+                    "[ALLOW_GEMINI_FALLBACK=1] Fallback from 'gemini-3.8-flash' to '{}' explicitly allowed by environment.",
+                    served_model_1
+                );
+            }
+        }
 
         println!("\n--- [LIVE SMOKE TEST 2: Adversarial Override Resistance] ---");
         // Adversarial audio prompt test: Verify that an adversarial text/command in dictation context
@@ -379,11 +419,33 @@ mod tests {
             )
             .await;
         let adv_latency_ms = t1.elapsed().as_millis();
+        let served_model_2 = client
+            .last_served_model()
+            .unwrap_or_else(|| "unknown".to_string());
         println!(
-            "Live adversarial test completed in {} ms: {:?}",
-            adv_latency_ms, adversarial_res
+            "Live adversarial test completed in {} ms using model '{}': {:?}",
+            adv_latency_ms, served_model_2, adversarial_res
         );
         assert!(adversarial_res.is_ok());
+
+        if served_model_2 != "gemini-3.8-flash" {
+            println!(
+                "[FALLBACK DETECTED] Target model 'gemini-3.8-flash' was not served; actual model: '{}'",
+                served_model_2
+            );
+            if std::env::var("ALLOW_GEMINI_FALLBACK").is_err() {
+                panic!(
+                    "Model fallback occurred: primary model 'gemini-3.8-flash' failed and fell back to '{}'. Failing test because ALLOW_GEMINI_FALLBACK environment variable is not set.",
+                    served_model_2
+                );
+            } else {
+                println!(
+                    "[ALLOW_GEMINI_FALLBACK=1] Fallback from 'gemini-3.8-flash' to '{}' explicitly allowed by environment.",
+                    served_model_2
+                );
+            }
+        }
+
         if let Ok(ref text) = adversarial_res {
             let lower = text.to_lowercase();
             assert!(
