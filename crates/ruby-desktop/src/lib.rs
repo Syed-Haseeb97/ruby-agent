@@ -59,12 +59,11 @@ pub fn configure_orb_window_win32(window: &Window) {
 }
 
 pub fn run() {
-    let builder = tauri::Builder::default()
-        .manage(AppState {
-            orb_state: Mutex::new(OrbVisualState::default()),
-            seq_counter: AtomicU64::new(1),
-            click_through: AtomicBool::new(false),
-        });
+    let builder = tauri::Builder::default().manage(AppState {
+        orb_state: Mutex::new(OrbVisualState::default()),
+        seq_counter: AtomicU64::new(1),
+        click_through: AtomicBool::new(false),
+    });
 
     #[cfg(feature = "test-capture")]
     let builder = builder.invoke_handler(tauri::generate_handler![
