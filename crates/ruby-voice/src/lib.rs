@@ -1,7 +1,15 @@
 //! Audio capture, lock-free ringbuffers, local VAD, and pluggable TtsEngine trait.
 
+pub mod capture;
+pub mod vad;
+pub mod wav;
+
 use async_trait::async_trait;
 use thiserror::Error;
+
+pub use capture::{AudioSource, CpalAudioCapture, MockAudioSource};
+pub use vad::{frame_rms, trim_silence_vad};
+pub use wav::encode_wav_16k_mono;
 
 #[derive(Debug, Error)]
 pub enum VoiceError {
@@ -11,30 +19,6 @@ pub enum VoiceError {
     Synthesis(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-pub trait AudioSource: Send + Sync {
-    fn start_recording(&mut self) -> Result<(), VoiceError>;
-    fn stop_recording(&mut self) -> Result<Vec<u8>, VoiceError>;
-}
-
-/// Trims leading and trailing silence based on energy thresholds.
-pub fn trim_silence(samples: &[i16], threshold: i16) -> &[i16] {
-    let start = samples
-        .iter()
-        .position(|&s| s.abs() > threshold)
-        .unwrap_or(0);
-    let end = samples
-        .iter()
-        .rposition(|&s| s.abs() > threshold)
-        .map(|idx| idx + 1)
-        .unwrap_or(samples.len());
-
-    if start >= end {
-        &[]
-    } else {
-        &samples[start..end]
-    }
 }
 
 #[async_trait]

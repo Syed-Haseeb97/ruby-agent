@@ -2,9 +2,9 @@
 //! Coordinates the transparent floating Liquid Orb window,
 //! the Editorial Control Console, typed IPC, and Win32 window properties.
 
-use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Mutex;
-use tauri::{Manager, Window};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager, Window};
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Dwm::{
@@ -17,7 +17,11 @@ use windows::Win32::{
     },
 };
 
-use ruby_core::OrbVisualState;
+use ruby_core::{OperationalState, OrbVisualState};
+use ruby_dictation::SystemDictationEngine;
+use ruby_gemini::GeminiDictationClient;
+use ruby_platform::{HotKeyAction, KeyboardHookHandle, WindowsDesktopController};
+use ruby_voice::CpalAudioCapture;
 
 pub mod commands;
 
@@ -59,6 +63,20 @@ pub fn configure_orb_window_win32(window: &Window) {
 }
 
 pub fn run() {
+    let is_diagnostic = std::env::args().any(|a| a == "--diagnostic");
+    if is_diagnostic {
+        println!("============================================================");
+        println!("RUBY ASSISTANT - M1 WISPR FLOW DICTATION DIAGNOSTIC MODE");
+        println!("============================================================");
+        println!("* Low-Level Keyboard Hook: Ctrl+Win hold-to-talk (>=250ms)");
+        println!("* Double-Tap: Hands-free toggle (<350ms interval)");
+        println!("* Start Menu Suppression: VK_NONAME (0xFC) SendInput active");
+        println!("* Cancel: Esc | Abort: Any 3rd key | Kill Switch: Ctrl+Alt+Shift+R");
+        println!("* Audio: cpal 16kHz mono -> Energy VAD -> gemini-3.8-flash (thinkingLevel: low)");
+        println!("* Insertion: SendInput Unicode (<64 chars) / Clipboard paste (>=64 chars)");
+        println!("============================================================");
+    }
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Mutex::new(OrbVisualState::default()),
         seq_counter: AtomicU64::new(1),
@@ -85,6 +103,81 @@ pub fn run() {
             if let Some(orb_win) = app.get_webview_window("orb") {
                 configure_orb_window_win32(&orb_win.as_ref().window());
             }
+
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let kill_switch = Arc::new(AtomicBool::new(false));
+                let desktop_controller = Box::new(WindowsDesktopController::new(Arc::clone(&kill_switch)));
+                let audio_source = Box::new(CpalAudioCapture::new());
+                let gemini_client = Box::new(GeminiDictationClient::default());
+
+                let app_handle_cb = app_handle.clone();
+                let dictation_engine = Arc::new(SystemDictationEngine::new(
+                    audio_source,
+                    gemini_client,
+                    desktop_controller,
+                    Some(Arc::new(move |dict_state| {
+                        let op_str = dict_state.to_orb_operational_label();
+                        let op = match op_str {
+                            "Listening" => OperationalState::Listening,
+                            "Thinking" => OperationalState::Thinking,
+                            "Speaking" => OperationalState::Speaking,
+                            "Error" => OperationalState::Error,
+                            _ => OperationalState::Idle,
+                        };
+                        let state = app_handle_cb.state::<AppState>();
+                        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst);
+                        let mut orb = state.orb_state.lock().unwrap();
+                        orb.operational = op;
+                        let payload = SequencedOrbEvent { seq, state: *orb };
+                        let _ = app_handle_cb.emit("orb_state_changed", payload);
+                    })),
+                ));
+
+                if let Ok(hook_handle) = KeyboardHookHandle::start() {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(r) => r,
+                        Err(_) => return,
+                    };
+
+                    rt.block_on(async {
+                        while let Ok(action) = hook_handle.receiver().recv() {
+                            match action {
+                                HotKeyAction::HoldStarted => {
+                                    let _ = dictation_engine.start_recording().await;
+                                }
+                                HotKeyAction::HoldReleased { .. } => {
+                                    let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
+                                    let _ = dictation_engine.finish_and_insert(target_proc).await;
+                                }
+                                HotKeyAction::DoubleTapToggled { active } => {
+                                    if active {
+                                        let _ = dictation_engine.start_recording().await;
+                                    } else {
+                                        let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
+                                        let _ = dictation_engine.finish_and_insert(target_proc).await;
+                                    }
+                                }
+                                HotKeyAction::Cancelled => {
+                                    dictation_engine.cancel().await;
+                                }
+                                HotKeyAction::AbortedThirdKey { .. } => {
+                                    dictation_engine.cancel().await;
+                                }
+                                HotKeyAction::KillSwitchTriggered => {
+                                    kill_switch.store(true, Ordering::SeqCst);
+                                    dictation_engine.cancel().await;
+                                    std::process::exit(0);
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())

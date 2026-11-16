@@ -2,13 +2,25 @@
 //! Provides SendInput, Windows.Graphics.Capture, low-level keyboard hook,
 //! clipboard capture/restore, and the DesktopController trait with mock.
 
+pub mod elevation_check;
+pub mod hook_types;
+pub mod hotkey_machine;
+pub mod keyboard_hook;
+pub mod text_injection;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetSystemMetrics, SetWindowDisplayAffinity, SM_CXSCREEN, SM_CYSCREEN,
+    WINDOW_DISPLAY_AFFINITY,
+};
 
-pub const VK_NONAME_VALUE: u16 = 0xFC;
+pub use hook_types::{HotKeyAction, RawKeyEvent, VK_NONAME_VALUE};
+pub use hotkey_machine::HotKeyStateMachine;
+pub use keyboard_hook::KeyboardHookHandle;
+
 pub const WDA_EXCLUDEFROMCAPTURE_VALUE: u32 = 0x00000011;
 
 #[derive(Debug, Error)]
@@ -37,6 +49,73 @@ pub trait DesktopController: Send + Sync {
     fn type_text(&self, text: &str) -> Result<(), PlatformError>;
     fn paste_text_with_restore(&self, text: &str) -> Result<(), PlatformError>;
     fn is_kill_switch_active(&self) -> bool;
+}
+
+/// Native Windows DesktopController implementation.
+pub struct WindowsDesktopController {
+    kill_switch: Arc<AtomicBool>,
+}
+
+impl WindowsDesktopController {
+    pub fn new(kill_switch: Arc<AtomicBool>) -> Self {
+        Self { kill_switch }
+    }
+}
+
+impl DesktopController for WindowsDesktopController {
+    fn screen_size(&self) -> Result<ScreenSize, PlatformError> {
+        unsafe {
+            let width = GetSystemMetrics(SM_CXSCREEN) as u32;
+            let height = GetSystemMetrics(SM_CYSCREEN) as u32;
+            Ok(ScreenSize { width, height })
+        }
+    }
+
+    fn capture_primary_screen(&self) -> Result<Vec<u8>, PlatformError> {
+        // Placeholder for Windows.Graphics.Capture in M3
+        Ok(vec![0xFF, 0xD8, 0xFF, 0xE0])
+    }
+
+    fn click(&self, _x: u32, _y: u32) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn double_click(&self, _x: u32, _y: u32) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn type_text(&self, text: &str) -> Result<(), PlatformError> {
+        // 1. Password field check
+        if elevation_check::is_foreground_password_field() {
+            return Err(PlatformError::PasswordFieldDetected);
+        }
+
+        // 2. Target elevation check
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if !hwnd.0.is_null()
+                && elevation_check::is_target_window_elevated(hwnd)?
+                && !elevation_check::is_current_process_elevated()
+            {
+                return Err(PlatformError::ElevatedTargetBlocked);
+            }
+        }
+
+        // 3. Short vs long text heuristic
+        if text.chars().count() < 64 {
+            text_injection::type_unicode_text(text)
+        } else {
+            text_injection::paste_text_with_clipboard_restore(text)
+        }
+    }
+
+    fn paste_text_with_restore(&self, text: &str) -> Result<(), PlatformError> {
+        text_injection::paste_text_with_clipboard_restore(text)
+    }
+
+    fn is_kill_switch_active(&self) -> bool {
+        self.kill_switch.load(Ordering::SeqCst)
+    }
 }
 
 /// Mock DesktopController for offline unit and integration testing.
