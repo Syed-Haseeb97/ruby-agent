@@ -290,6 +290,233 @@ function drawFace(
   }
 }
 
+export function renderLiquidOrbFrame(
+  ctx: CanvasRenderingContext2D,
+  state: OrbVisualState,
+  width: number,
+  height: number,
+  t: number,
+  spinAngle: number = 0,
+  hovered: boolean = false
+): void {
+  const w = width;
+  const h = height;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Center and base radius
+  let cx = w / 2;
+  let cy = h / 2 - 6;
+  let radius = Math.min(w * 0.34, h * 0.34, 150.0);
+  if (hovered) {
+    radius *= 1.025;
+  }
+
+  // Active mood determination
+  const effectiveMood: string =
+    state.operational === "Thinking"
+      ? "Thinking"
+      : state.operational === "Error"
+      ? "Error"
+      : state.emotion !== "Neutral"
+      ? state.emotion
+      : state.operational;
+
+  // Vertical bounce / breathing
+  const breathe = Math.sin(
+    t * (effectiveMood !== "Sad" && effectiveMood !== "Empathetic" ? 1.9 : 0.8)
+  );
+  if (effectiveMood === "Happy" || effectiveMood === "Excited") {
+    cy -= Math.abs(
+      Math.sin(t * (effectiveMood === "Excited" ? 4.2 : 3.2)) *
+        (effectiveMood === "Excited" ? 7 : 5)
+    );
+  } else if (effectiveMood === "Sad") {
+    cy += 3 + Math.abs(breathe) * 3;
+  } else if (effectiveMood === "Error") {
+    cx += Math.sin(t * 12.0) * 2.0;
+  }
+
+  const [primary, secondary] = COLOR_MAP[effectiveMood] || COLOR_MAP.Idle;
+
+  // 1. Ambient Halo (omitted in Error)
+  if (effectiveMood !== "Error") {
+    const haloAlpha = effectiveMood !== "Sad" ? 55 / 255 : 28 / 255;
+    const haloGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.55);
+    haloGrad.addColorStop(0, hexToRgba(primary, haloAlpha));
+    haloGrad.addColorStop(0.52, hexToRgba(secondary, 25 / 255));
+    haloGrad.addColorStop(1, hexToRgba(secondary, 0));
+
+    ctx.save();
+    ctx.fillStyle = haloGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * 1.55, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // 2. Grounding Shadow (QRectF(cx - radius, cy - radius * 0.4, radius * 2, radius * 1.6))
+    const shadowGrad = ctx.createRadialGradient(
+      cx,
+      cy + radius * 0.48,
+      0,
+      cx,
+      cy + radius * 0.48,
+      radius * 0.95
+    );
+    shadowGrad.addColorStop(0, "rgba(0, 0, 0, 0.392)");
+    shadowGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+
+    ctx.save();
+    ctx.fillStyle = shadowGrad;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy + radius * 0.4, radius, radius * 0.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 3. Deforming Body Silhouette
+  let energy = 0.025;
+  if (effectiveMood === "Happy") energy = 0.065;
+  else if (effectiveMood === "Excited") energy = 0.085;
+  else if (effectiveMood === "Curious") energy = 0.035;
+  else if (effectiveMood === "Surprised") energy = 0.055;
+  else if (effectiveMood === "Empathetic") energy = 0.022;
+  else if (effectiveMood === "Listening") energy = 0.038;
+  else if (effectiveMood === "Thinking") energy = 0.012;
+  else if (effectiveMood === "Sad") energy = 0.018;
+  else if (effectiveMood === "Error") energy = 0.07;
+
+  ctx.save();
+  drawBodyPath(ctx, cx, cy, radius, t, effectiveMood, energy);
+
+  // Body Gradient Fill
+  let highlightX = cx + Math.cos(t * 0.72) * radius * 0.24;
+  let highlightY = cy + Math.sin(t * 0.58) * radius * 0.22;
+  if (effectiveMood === "Thinking") {
+    const yawShine = (spinAngle * Math.PI) / 180;
+    highlightX = cx + Math.sin(yawShine) * radius * 0.24;
+    highlightY = cy - radius * 0.28;
+  }
+
+  const bodyGrad = ctx.createRadialGradient(
+    highlightX,
+    highlightY,
+    0,
+    highlightX,
+    highlightY,
+    radius * 1.38
+  );
+
+  if (effectiveMood === "Sad") {
+    bodyGrad.addColorStop(0.0, "#b9ddff");
+    bodyGrad.addColorStop(0.22, "#80bdff");
+    bodyGrad.addColorStop(0.58, "#60a5fa");
+    bodyGrad.addColorStop(1.0, "#60a5fa");
+  } else if (effectiveMood === "Error") {
+    bodyGrad.addColorStop(0.0, "#ff9aa8");
+    bodyGrad.addColorStop(0.18, "#ff647b");
+    bodyGrad.addColorStop(0.42, "#ff304f");
+    bodyGrad.addColorStop(0.72, "#e7193c");
+    bodyGrad.addColorStop(1.0, "#b91235");
+  } else {
+    const exact = MOOD_EXACT_LIGHTER[effectiveMood] || MOOD_EXACT_LIGHTER.Idle;
+    bodyGrad.addColorStop(0.0, exact[0]);
+    bodyGrad.addColorStop(0.22, exact[1]);
+    bodyGrad.addColorStop(0.52, primary);
+    bodyGrad.addColorStop(0.82, secondary);
+    bodyGrad.addColorStop(1.0, secondary);
+  }
+
+  ctx.fillStyle = bodyGrad;
+  ctx.fill();
+  ctx.strokeStyle = hexToRgba(primary, 185 / 255);
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.restore();
+
+  // 4. Thinking Faceless Rotating Sphere Meridian Shading
+  if (effectiveMood === "Thinking") {
+    ctx.save();
+    const yaw = (spinAngle * Math.PI) / 180;
+    const side = Math.sin(yaw);
+
+    const bandX = cx + side * radius * 0.5;
+    const bandGrad = ctx.createRadialGradient(
+      bandX,
+      cy - radius * 0.05,
+      0,
+      bandX,
+      cy - radius * 0.05,
+      radius * 0.95
+    );
+    bandGrad.addColorStop(0.0, "rgba(255, 255, 255, 0.243)");
+    bandGrad.addColorStop(0.42, "rgba(210, 205, 255, 0.094)");
+    bandGrad.addColorStop(1.0, "rgba(10, 8, 35, 0)");
+    ctx.fillStyle = bandGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    const shadeX = cx - side * radius * 0.42;
+    const shadeGrad = ctx.createRadialGradient(shadeX, cy, 0, shadeX, cy, radius * 1.05);
+    const alphaEdge = (80 + 65 * Math.abs(side)) / 255;
+    const alphaRim = (115 + 70 * Math.abs(side)) / 255;
+    shadeGrad.addColorStop(0.0, "rgba(18, 12, 55, 0)");
+    shadeGrad.addColorStop(0.58, "rgba(18, 12, 55, 0.039)");
+    shadeGrad.addColorStop(0.84, `rgba(8, 6, 30, ${alphaEdge})`);
+    shadeGrad.addColorStop(1.0, `rgba(5, 4, 20, ${alphaRim})`);
+    ctx.fillStyle = shadeGrad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Inner edge and reflected light
+  ctx.save();
+  drawBodyPath(ctx, cx - 1.5, cy - 2.0, radius * 0.955, t + 0.08, effectiveMood, energy);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.165)";
+  ctx.lineWidth = 1.0;
+  ctx.stroke();
+  ctx.restore();
+
+  // 5. Dark Face Core (Idle, Listening, Speaking)
+  const hasCore = usesBlackCore(state);
+  const coreRadius = radius * 0.72;
+
+  if (hasCore) {
+    ctx.save();
+    const coreGrad = ctx.createRadialGradient(
+      cx - coreRadius * 0.32,
+      cy - coreRadius * 0.42,
+      0,
+      cx - coreRadius * 0.32,
+      cy - coreRadius * 0.42,
+      coreRadius * 1.55
+    );
+    coreGrad.addColorStop(0.0, "#30313a");
+    coreGrad.addColorStop(0.22, "#17181e");
+    coreGrad.addColorStop(0.68, "#08090d");
+    coreGrad.addColorStop(0.94, "#020305");
+    coreGrad.addColorStop(1.0, "#000000");
+
+    ctx.fillStyle = coreGrad;
+    ctx.strokeStyle = "#555965";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // 6. Facial Expressions (Thinking is strictly faceless)
+  if (effectiveMood !== "Thinking") {
+    const faceRadius = hasCore ? coreRadius * 0.88 : radius;
+    drawFace(ctx, cx, cy, faceRadius, t, effectiveMood, state.speaking_active);
+  }
+}
+
 export const LiquidOrbCanvas: React.FC<Props> = ({
   state,
   width = 300,
@@ -332,222 +559,8 @@ export const LiquidOrbCanvas: React.FC<Props> = ({
 
       const t = deterministicTime !== undefined ? deterministicTime : nowSec - startedAtRef.current;
       const spinAngle = deterministicSpinAngle !== undefined ? deterministicSpinAngle : spinAngleRef.current;
-      const w = width;
-      const h = height;
 
-      ctx.clearRect(0, 0, w, h);
-
-      // Center and base radius
-      let cx = w / 2;
-      let cy = h / 2 - 6;
-      let radius = Math.min(w * 0.34, h * 0.34, 150.0);
-      if (hoveredRef.current) {
-        radius *= 1.025;
-      }
-
-      // Active mood determination
-      const effectiveMood: string =
-        state.operational === "Thinking"
-          ? "Thinking"
-          : state.operational === "Error"
-          ? "Error"
-          : state.emotion !== "Neutral"
-          ? state.emotion
-          : state.operational;
-
-      // Vertical bounce / breathing
-      const breathe = Math.sin(
-        t * (effectiveMood !== "Sad" && effectiveMood !== "Empathetic" ? 1.9 : 0.8)
-      );
-      if (effectiveMood === "Happy" || effectiveMood === "Excited") {
-        cy -= Math.abs(
-          Math.sin(t * (effectiveMood === "Excited" ? 4.2 : 3.2)) *
-            (effectiveMood === "Excited" ? 7 : 5)
-        );
-      } else if (effectiveMood === "Sad") {
-        cy += 3 + Math.abs(breathe) * 3;
-      } else if (effectiveMood === "Error") {
-        cx += Math.sin(t * 12.0) * 2.0;
-      }
-
-      const [primary, secondary] = COLOR_MAP[effectiveMood] || COLOR_MAP.Idle;
-
-      // 1. Ambient Halo (omitted in Error)
-      if (effectiveMood !== "Error") {
-        const haloAlpha = effectiveMood !== "Sad" ? 55 / 255 : 28 / 255;
-        const haloGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 1.55);
-        haloGrad.addColorStop(0, hexToRgba(primary, haloAlpha));
-        haloGrad.addColorStop(0.52, hexToRgba(secondary, 25 / 255));
-        haloGrad.addColorStop(1, hexToRgba(secondary, 0));
-
-        ctx.save();
-        ctx.fillStyle = haloGrad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius * 1.55, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-
-        // 2. Grounding Shadow (QRectF(cx - radius, cy - radius * 0.4, radius * 2, radius * 1.6))
-        const shadowGrad = ctx.createRadialGradient(
-          cx,
-          cy + radius * 0.48,
-          0,
-          cx,
-          cy + radius * 0.48,
-          radius * 0.95
-        );
-        shadowGrad.addColorStop(0, "rgba(0, 0, 0, 0.392)");
-        shadowGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
-
-        ctx.save();
-        ctx.fillStyle = shadowGrad;
-        ctx.beginPath();
-        ctx.ellipse(cx, cy + radius * 0.4, radius, radius * 0.8, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      // 3. Deforming Body Silhouette
-      let energy = 0.025;
-      if (effectiveMood === "Happy") energy = 0.065;
-      else if (effectiveMood === "Excited") energy = 0.085;
-      else if (effectiveMood === "Curious") energy = 0.035;
-      else if (effectiveMood === "Surprised") energy = 0.055;
-      else if (effectiveMood === "Empathetic") energy = 0.022;
-      else if (effectiveMood === "Listening") energy = 0.038;
-      else if (effectiveMood === "Thinking") energy = 0.012;
-      else if (effectiveMood === "Sad") energy = 0.018;
-      else if (effectiveMood === "Error") energy = 0.07;
-
-      ctx.save();
-      drawBodyPath(ctx, cx, cy, radius, t, effectiveMood, energy);
-
-      // Body Gradient Fill
-      let highlightX = cx + Math.cos(t * 0.72) * radius * 0.24;
-      let highlightY = cy + Math.sin(t * 0.58) * radius * 0.22;
-      if (effectiveMood === "Thinking") {
-        const yawShine = (spinAngle * Math.PI) / 180;
-        highlightX = cx + Math.sin(yawShine) * radius * 0.24;
-        highlightY = cy - radius * 0.28;
-      }
-
-      const bodyGrad = ctx.createRadialGradient(
-        highlightX,
-        highlightY,
-        0,
-        highlightX,
-        highlightY,
-        radius * 1.38
-      );
-
-      if (effectiveMood === "Sad") {
-        bodyGrad.addColorStop(0.0, "#b9ddff");
-        bodyGrad.addColorStop(0.22, "#80bdff");
-        bodyGrad.addColorStop(0.58, "#60a5fa");
-        bodyGrad.addColorStop(1.0, "#60a5fa");
-      } else if (effectiveMood === "Error") {
-        bodyGrad.addColorStop(0.0, "#ff9aa8");
-        bodyGrad.addColorStop(0.18, "#ff647b");
-        bodyGrad.addColorStop(0.42, "#ff304f");
-        bodyGrad.addColorStop(0.72, "#e7193c");
-        bodyGrad.addColorStop(1.0, "#b91235");
-      } else {
-        const exact = MOOD_EXACT_LIGHTER[effectiveMood] || MOOD_EXACT_LIGHTER.Idle;
-        bodyGrad.addColorStop(0.0, exact[0]);
-        bodyGrad.addColorStop(0.22, exact[1]);
-        bodyGrad.addColorStop(0.52, primary);
-        bodyGrad.addColorStop(0.82, secondary);
-        bodyGrad.addColorStop(1.0, secondary);
-      }
-
-      ctx.fillStyle = bodyGrad;
-      ctx.fill();
-      ctx.strokeStyle = hexToRgba(primary, 185 / 255);
-      ctx.lineWidth = 1.4;
-      ctx.stroke();
-      ctx.restore();
-
-      // 4. Thinking Faceless Rotating Sphere Meridian Shading
-      if (effectiveMood === "Thinking") {
-        ctx.save();
-        const yaw = (spinAngle * Math.PI) / 180;
-        const side = Math.sin(yaw);
-
-        const bandX = cx + side * radius * 0.5;
-        const bandGrad = ctx.createRadialGradient(
-          bandX,
-          cy - radius * 0.05,
-          0,
-          bandX,
-          cy - radius * 0.05,
-          radius * 0.95
-        );
-        bandGrad.addColorStop(0.0, "rgba(255, 255, 255, 0.243)");
-        bandGrad.addColorStop(0.42, "rgba(210, 205, 255, 0.094)");
-        bandGrad.addColorStop(1.0, "rgba(10, 8, 35, 0)");
-        ctx.fillStyle = bandGrad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.fill();
-
-        const shadeX = cx - side * radius * 0.42;
-        const shadeGrad = ctx.createRadialGradient(shadeX, cy, 0, shadeX, cy, radius * 1.05);
-        const alphaEdge = (80 + 65 * Math.abs(side)) / 255;
-        const alphaRim = (115 + 70 * Math.abs(side)) / 255;
-        shadeGrad.addColorStop(0.0, "rgba(18, 12, 55, 0)");
-        shadeGrad.addColorStop(0.58, "rgba(18, 12, 55, 0.039)");
-        shadeGrad.addColorStop(0.84, `rgba(8, 6, 30, ${alphaEdge})`);
-        shadeGrad.addColorStop(1.0, `rgba(5, 4, 20, ${alphaRim})`);
-        ctx.fillStyle = shadeGrad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      // Inner edge and reflected light
-      ctx.save();
-      drawBodyPath(ctx, cx - 1.5, cy - 2.0, radius * 0.955, t + 0.08, effectiveMood, energy);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.165)";
-      ctx.lineWidth = 1.0;
-      ctx.stroke();
-      ctx.restore();
-
-      // 5. Dark Face Core (Idle, Listening, Speaking)
-      const hasCore = usesBlackCore(state);
-      const coreRadius = radius * 0.72;
-
-      if (hasCore) {
-        ctx.save();
-        const coreGrad = ctx.createRadialGradient(
-          cx - coreRadius * 0.32,
-          cy - coreRadius * 0.42,
-          0,
-          cx - coreRadius * 0.32,
-          cy - coreRadius * 0.42,
-          coreRadius * 1.55
-        );
-        coreGrad.addColorStop(0.0, "#30313a");
-        coreGrad.addColorStop(0.22, "#17181e");
-        coreGrad.addColorStop(0.68, "#08090d");
-        coreGrad.addColorStop(0.94, "#020305");
-        coreGrad.addColorStop(1.0, "#000000");
-
-        ctx.fillStyle = coreGrad;
-        ctx.strokeStyle = "#555965";
-        ctx.lineWidth = 1.5;
-        ctx.beginPath();
-        ctx.arc(cx, cy, coreRadius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // 6. Facial Expressions (Thinking is strictly faceless)
-      if (effectiveMood !== "Thinking") {
-        const faceRadius = hasCore ? coreRadius * 0.88 : radius;
-        drawFace(ctx, cx, cy, faceRadius, t, effectiveMood, state.speaking_active);
-      }
+      renderLiquidOrbFrame(ctx, state, width, height, t, spinAngle, hoveredRef.current);
     };
 
     animId = requestAnimationFrame(render);

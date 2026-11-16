@@ -1,7 +1,6 @@
 /target
 target/
 **/*.rs.bk
-Cargo.lock
 
 # Node / Vite
 node_modules/
@@ -26,11 +25,16 @@ playwright-profile/
 chrome_data/
 edge_data/
 
-# Screenshots containing personal screen capture data
-acceptance/screen_captured*.png
-acceptance/tauri_live_window*.png
-acceptance/live_tauri_orb_idle.png
+# Bulk acceptance test artifacts and outputs
+acceptance/canvas_rendered/
+acceptance/python_reference/
+acceptance/side_by_side/
+acceptance/matrix/
 acceptance/tauri_rendered/
+acceptance/*.png
+acceptance/*.js
+acceptance/*.html
+acceptance/squash_and_prune.py
 
 # IDE / OS
 .vscode/
