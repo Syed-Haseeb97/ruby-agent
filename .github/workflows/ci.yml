@@ -1,0 +1,47 @@
+name: Ruby M0 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-and-test:
+    name: Windows Workspace Build & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Rust Stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+
+      - name: Build Frontend Assets
+        working-directory: crates/ruby-desktop/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Verify Code Formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy Linter
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Workspace Unit & Mood Tests
+        run: cargo test --workspace --verbose

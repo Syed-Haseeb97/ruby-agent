@@ -1,0 +1,42 @@
+[package]
+name = "ruby-desktop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+ruby-config.workspace = true
+ruby-policy.workspace = true
+ruby-platform.workspace = true
+ruby-voice.workspace = true
+ruby-gemini.workspace = true
+ruby-memory.workspace = true
+ruby-actions.workspace = true
+ruby-mcp.workspace = true
+ruby-core.workspace = true
+ruby-dictation.workspace = true
+
+tauri = { version = "2.2", features = ["tray-icon"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+base64 = { version = "0.22", optional = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Dwm",
+] }
+
+[features]
+default = []
+test-capture = ["dep:base64"]
+
+[lints]
+workspace = true

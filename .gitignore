@@ -1,0 +1,40 @@
+/target
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Node / Vite
+node_modules/
+dist/
+
+# Environment, Secrets, and API Keys
+.env
+.env.*
+*.env
+*.env.local
+*.key
+*.pem
+*.cert
+*.pfx
+id_rsa*
+*.secret
+
+# Browser Profiles and User Data
+data/
+*profile*/
+playwright-profile/
+chrome_data/
+edge_data/
+
+# Screenshots containing personal screen capture data
+acceptance/screen_captured*.png
+acceptance/tauri_live_window*.png
+acceptance/live_tauri_orb_idle.png
+acceptance/tauri_rendered/
+
+# IDE / OS
+.vscode/
+.idea/
+*.log
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for Ruby Assistant","local":true,"windows":["main","orb"],"permissions":["core:default"]}}

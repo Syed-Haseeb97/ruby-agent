@@ -1,0 +1,17 @@
+[package]
+name = "ruby-voice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+cpal = "0.15"
+rodio = "0.19"
+rtrb = "0.3"
+
+[lints]
+workspace = true

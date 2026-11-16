@@ -1,0 +1,19 @@
+[package]
+name = "ruby-actions"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ruby-policy.workspace = true
+ruby-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+open = "5.3"
+
+[lints]
+workspace = true

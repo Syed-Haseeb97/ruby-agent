@@ -1,0 +1,18 @@
+[package]
+name = "ruby-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ruby-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+async-trait.workspace = true
+
+[lints]
+workspace = true

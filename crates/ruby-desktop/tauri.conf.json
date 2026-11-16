@@ -1,0 +1,52 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
+  "productName": "Ruby",
+  "version": "0.1.0",
+  "identifier": "com.ruby.assistant",
+  "build": {
+    "frontendDist": "./frontend/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "orb",
+        "title": "Ruby Orb",
+        "width": 300,
+        "height": 280,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "resizable": false,
+        "url": "index.html"
+      },
+      {
+        "label": "main",
+        "title": "Ruby Assistant Console",
+        "width": 960,
+        "height": 680,
+        "transparent": false,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "url": "index.html#console"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

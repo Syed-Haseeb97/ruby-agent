@@ -1,0 +1,16 @@
+[package]
+name = "ruby-memory"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[lints]
+workspace = true

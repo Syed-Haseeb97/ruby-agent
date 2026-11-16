@@ -1,0 +1,22 @@
+[package]
+name = "ruby-dictation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+ruby-voice.workspace = true
+ruby-gemini.workspace = true
+ruby-platform.workspace = true
+ruby-policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+
+[lints]
+workspace = true
