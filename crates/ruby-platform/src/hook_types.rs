@@ -52,9 +52,13 @@ impl RawKeyEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HotKeyAction {
-    /// Ctrl+Win held down and duration has passed minimum hold threshold (~250 ms)
+    /// Ctrl+Win key-down detected: start buffering audio immediately into pre-roll ring buffer
+    PreRollStarted,
+    /// Early release before 250ms hold threshold: discard pre-roll buffer
+    PreRollDiscarded,
+    /// Ctrl+Win held down and duration has passed minimum hold threshold (~250 ms): commit recording
     HoldStarted,
-    /// Ctrl+Win released after holding
+    /// Ctrl+Win released after holding: triggers finish and insertion
     HoldReleased { duration_ms: u64 },
     /// Quick double-tap of Ctrl+Win toggled hands-free mode
     DoubleTapToggled { active: bool },

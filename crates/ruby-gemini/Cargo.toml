@@ -16,5 +16,9 @@ base64 = "0.22"
 keyring = "3"
 tracing.workspace = true
 
+[features]
+default = []
+live-gemini = []
+
 [lints]
 workspace = true

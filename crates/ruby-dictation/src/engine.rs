@@ -10,7 +10,10 @@ use ruby_gemini::DictationClient;
 use ruby_platform::DesktopController;
 use ruby_voice::{encode_wav_16k_mono, trim_silence_vad, AudioSource};
 
-use crate::{DictationError, DictationLatencyBudget, DictationState};
+use crate::{
+    DictationCue, DictationError, DictationLatencyBudget, DictationState, HandsFreeAction,
+    HandsFreeConfig,
+};
 
 pub struct SystemDictationEngine {
     audio_source: Arc<Mutex<Box<dyn AudioSource>>>,
@@ -20,6 +23,8 @@ pub struct SystemDictationEngine {
     last_audio_wav: Arc<Mutex<Option<Vec<u8>>>>,
     last_target_process: Arc<Mutex<Option<String>>>,
     on_state_change: Option<Arc<dyn Fn(DictationState) + Send + Sync>>,
+    on_cue: Option<Arc<dyn Fn(DictationCue) + Send + Sync>>,
+    hands_free_config: HandsFreeConfig,
 }
 
 impl SystemDictationEngine {
@@ -29,6 +34,24 @@ impl SystemDictationEngine {
         desktop_controller: Box<dyn DesktopController>,
         on_state_change: Option<Arc<dyn Fn(DictationState) + Send + Sync>>,
     ) -> Self {
+        Self::with_config(
+            audio_source,
+            dictation_client,
+            desktop_controller,
+            on_state_change,
+            None,
+            HandsFreeConfig::default(),
+        )
+    }
+
+    pub fn with_config(
+        audio_source: Box<dyn AudioSource>,
+        dictation_client: Box<dyn DictationClient>,
+        desktop_controller: Box<dyn DesktopController>,
+        on_state_change: Option<Arc<dyn Fn(DictationState) + Send + Sync>>,
+        on_cue: Option<Arc<dyn Fn(DictationCue) + Send + Sync>>,
+        hands_free_config: HandsFreeConfig,
+    ) -> Self {
         Self {
             audio_source: Arc::new(Mutex::new(audio_source)),
             dictation_client: Arc::new(dictation_client),
@@ -37,6 +60,35 @@ impl SystemDictationEngine {
             last_audio_wav: Arc::new(Mutex::new(None)),
             last_target_process: Arc::new(Mutex::new(None)),
             on_state_change,
+            on_cue,
+            hands_free_config,
+        }
+    }
+
+    fn emit_cue(&self, cue: DictationCue) {
+        if let Some(ref cb) = self.on_cue {
+            cb(cue);
+        }
+    }
+
+    pub fn hands_free_config(&self) -> &HandsFreeConfig {
+        &self.hands_free_config
+    }
+
+    /// Evaluates hands-free safety rules:
+    /// - 5-minute (300s) hard limit: auto-stop and submit
+    /// - 3.5s of sustained trailing silence: auto-stop and submit
+    pub fn evaluate_hands_free_safety(
+        &self,
+        elapsed_recording_ms: u64,
+        trailing_silence_ms: u64,
+    ) -> HandsFreeAction {
+        if elapsed_recording_ms >= self.hands_free_config.max_recording_duration_ms {
+            HandsFreeAction::AutoStopMaxDuration
+        } else if trailing_silence_ms >= self.hands_free_config.silence_auto_stop_duration_ms {
+            HandsFreeAction::AutoStopSilence
+        } else {
+            HandsFreeAction::Continue
         }
     }
 
@@ -52,14 +104,49 @@ impl SystemDictationEngine {
         *self.state.read().await
     }
 
-    /// Begins audio recording on hold-to-talk key down.
-    pub async fn start_recording(&self) -> Result<(), DictationError> {
+    /// Starts pre-roll audio buffering immediately on Ctrl+Win key-down.
+    /// Dictation state remains Idle so no UI change or recording cue occurs until committed.
+    pub async fn start_pre_roll(&self) -> Result<(), DictationError> {
         let mut audio = self.audio_source.lock().await;
         audio
             .start_recording()
             .map_err(|e| DictationError::Capture(e.to_string()))?;
+        info!("Pre-roll audio capture started into rolling ring buffer");
+        Ok(())
+    }
+
+    /// Commits active recording once hold passes ~250 ms (or hands-free mode engaged).
+    /// Transitions state to Recording (Orb -> Listening) and emits start cue.
+    pub async fn commit_pre_roll(&self) -> Result<(), DictationError> {
+        {
+            let mut audio = self.audio_source.lock().await;
+            audio
+                .commit_recording()
+                .map_err(|e| DictationError::Capture(e.to_string()))?;
+        }
         self.set_state(DictationState::Recording).await;
-        info!("Dictation recording started");
+        self.emit_cue(DictationCue::Start);
+        info!("Pre-roll buffer committed to active Recording (Orb: Listening)");
+        Ok(())
+    }
+
+    /// Discards pre-roll audio buffer on early release (<250 ms tap).
+    pub async fn discard_pre_roll(&self) -> Result<(), DictationError> {
+        {
+            let mut audio = self.audio_source.lock().await;
+            audio
+                .discard_recording()
+                .map_err(|e| DictationError::Capture(e.to_string()))?;
+        }
+        self.set_state(DictationState::Idle).await;
+        info!("Pre-roll buffer discarded on early release (<250ms)");
+        Ok(())
+    }
+
+    /// Legacy / direct start recording. Commits immediately.
+    pub async fn start_recording(&self) -> Result<(), DictationError> {
+        self.start_pre_roll().await?;
+        self.commit_pre_roll().await?;
         Ok(())
     }
 
@@ -77,6 +164,7 @@ impl SystemDictationEngine {
                 .stop_recording()
                 .map_err(|e| DictationError::Capture(e.to_string()))?
         };
+        self.emit_cue(DictationCue::Stop);
 
         if raw_samples.is_empty() {
             self.set_state(DictationState::Idle).await;
@@ -237,6 +325,7 @@ impl SystemDictationEngine {
         let mut audio = self.audio_source.lock().await;
         let _ = audio.stop_recording();
         self.set_state(DictationState::Idle).await;
+        self.emit_cue(DictationCue::Cancel);
         info!("Dictation cancelled");
     }
 }

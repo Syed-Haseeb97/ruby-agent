@@ -146,19 +146,33 @@ pub fn run() {
                     rt.block_on(async {
                         while let Ok(action) = hook_handle.receiver().recv() {
                             match action {
+                                HotKeyAction::PreRollStarted => {
+                                    let _ = dictation_engine.start_pre_roll().await;
+                                }
+                                HotKeyAction::PreRollDiscarded => {
+                                    let _ = dictation_engine.discard_pre_roll().await;
+                                }
                                 HotKeyAction::HoldStarted => {
-                                    let _ = dictation_engine.start_recording().await;
+                                    let _ = dictation_engine.commit_pre_roll().await;
                                 }
                                 HotKeyAction::HoldReleased { .. } => {
                                     let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
-                                    let _ = dictation_engine.finish_and_insert(target_proc).await;
+                                    if let Err(ruby_dictation::DictationError::Insertion(ref s)) = dictation_engine.finish_and_insert(target_proc).await {
+                                        if s.contains("ElevatedTargetBlocked") {
+                                            let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
+                                        }
+                                    }
                                 }
                                 HotKeyAction::DoubleTapToggled { active } => {
                                     if active {
                                         let _ = dictation_engine.start_recording().await;
                                     } else {
                                         let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
-                                        let _ = dictation_engine.finish_and_insert(target_proc).await;
+                                        if let Err(ruby_dictation::DictationError::Insertion(ref s)) = dictation_engine.finish_and_insert(target_proc).await {
+                                            if s.contains("ElevatedTargetBlocked") {
+                                                let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
+                                            }
+                                        }
                                     }
                                 }
                                 HotKeyAction::Cancelled => {

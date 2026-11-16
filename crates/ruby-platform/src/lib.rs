@@ -31,6 +31,10 @@ pub enum PlatformError {
     ElevatedTargetBlocked,
     #[error("Focused control is a password field; typing aborted")]
     PasswordFieldDetected,
+    #[error("Security or UI Automation check failed; failing closed: {0}")]
+    SecurityCheckFailed(String),
+    #[error("Timeout waiting for physical Ctrl/Win modifier release")]
+    ModifierReleaseTimeout,
     #[error("Screen capture failed: {0}")]
     CaptureFailed(String),
 }
@@ -85,10 +89,8 @@ impl DesktopController for WindowsDesktopController {
     }
 
     fn type_text(&self, text: &str) -> Result<(), PlatformError> {
-        // 1. Password field check
-        if elevation_check::is_foreground_password_field() {
-            return Err(PlatformError::PasswordFieldDetected);
-        }
+        // 1. Password field check (Win32 styles + UI Automation, failing closed)
+        elevation_check::check_password_guardrails()?;
 
         // 2. Target elevation check
         unsafe {

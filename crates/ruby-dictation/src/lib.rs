@@ -11,6 +11,37 @@ use ts_rs::TS;
 
 pub use engine::SystemDictationEngine;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DictationCue {
+    Start,
+    Stop,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandsFreeConfig {
+    pub silence_auto_stop_duration_ms: u64,
+    pub max_recording_duration_ms: u64,
+    pub silence_threshold_rms: f32,
+}
+
+impl Default for HandsFreeConfig {
+    fn default() -> Self {
+        Self {
+            silence_auto_stop_duration_ms: 3500, // 3.5s of sustained silence auto-stops recording
+            max_recording_duration_ms: 300_000,  // 5 minutes (300s) hard limit
+            silence_threshold_rms: 300.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandsFreeAction {
+    Continue,
+    AutoStopSilence,
+    AutoStopMaxDuration,
+}
+
 #[derive(Debug, Error)]
 pub enum DictationError {
     #[error("Audio capture failed: {0}")]
@@ -171,5 +202,113 @@ mod tests {
             "Speaking"
         );
         assert_eq!(DictationState::Error.to_orb_operational_label(), "Error");
+    }
+
+    #[tokio::test]
+    async fn test_pre_roll_preserves_speech_within_50ms_of_keydown() {
+        // Speech starts at 30ms (sample 480 @ 16kHz)
+        let mut audio_fixture = vec![0i16; 480];
+        for i in 0..7520 {
+            audio_fixture.push(((i % 40) as i16 * 100) + 1000);
+        }
+
+        let audio = Box::new(MockAudioSource::new(audio_fixture));
+        let gemini = Box::new(MockDictationClient::new("Transcribed text with pre-roll"));
+        let desktop = Box::new(MockDesktopController::default());
+
+        let engine = SystemDictationEngine::new(audio, gemini, desktop, None);
+
+        // 1. Pre-roll started on keydown (t=0)
+        engine.start_pre_roll().await.unwrap();
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+
+        // 2. Minimum hold threshold (250ms) reached -> commit recording
+        engine.commit_pre_roll().await.unwrap();
+        assert_eq!(engine.current_state().await, DictationState::Recording);
+
+        // 3. User finishes talking and releases chord
+        let budget = engine
+            .finish_and_insert(Some("code.exe".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+        assert!(budget.total_millis < 500);
+    }
+
+    #[tokio::test]
+    async fn test_pre_roll_discard_on_early_release() {
+        let audio = Box::new(MockAudioSource::default());
+        let gemini = Box::new(MockDictationClient::default());
+        let desktop = Box::new(MockDesktopController::default());
+
+        let engine = SystemDictationEngine::new(audio, gemini, desktop, None);
+
+        // Key-down: pre-roll starts
+        engine.start_pre_roll().await.unwrap();
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+
+        // Released early (<250ms): discard pre-roll
+        engine.discard_pre_roll().await.unwrap();
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_dictation_cues_emitted() {
+        use std::sync::Mutex as StdMutex;
+        let cues = Arc::new(StdMutex::new(Vec::new()));
+        let cues_clone = Arc::clone(&cues);
+
+        let audio = Box::new(MockAudioSource::default());
+        let gemini = Box::new(MockDictationClient::default());
+        let desktop = Box::new(MockDesktopController::default());
+
+        let engine = SystemDictationEngine::with_config(
+            audio,
+            gemini,
+            desktop,
+            None,
+            Some(Arc::new(move |cue| {
+                cues_clone.lock().unwrap().push(cue);
+            })),
+            HandsFreeConfig::default(),
+        );
+
+        // Start
+        engine.start_recording().await.unwrap();
+        // Finish
+        let _ = engine.finish_and_insert(None).await.unwrap();
+        // Cancel
+        engine.cancel().await;
+
+        let recorded_cues = cues.lock().unwrap().clone();
+        assert_eq!(
+            recorded_cues,
+            vec![
+                DictationCue::Start,
+                DictationCue::Stop,
+                DictationCue::Cancel
+            ]
+        );
+    }
+
+    #[test]
+    fn test_hands_free_safety_rules() {
+        let audio = Box::new(MockAudioSource::default());
+        let gemini = Box::new(MockDictationClient::default());
+        let desktop = Box::new(MockDesktopController::default());
+
+        let engine = SystemDictationEngine::new(audio, gemini, desktop, None);
+
+        // 1. Normal active speech within limits -> Continue
+        let action = engine.evaluate_hands_free_safety(10_000, 1_000);
+        assert_eq!(action, HandsFreeAction::Continue);
+
+        // 2. Trailing silence exceeds 3.5s (3500ms) -> AutoStopSilence
+        let action_silence = engine.evaluate_hands_free_safety(10_000, 3_500);
+        assert_eq!(action_silence, HandsFreeAction::AutoStopSilence);
+
+        // 3. Elapsed recording reaches 5 minutes (300,000ms) -> AutoStopMaxDuration
+        let action_timeout = engine.evaluate_hands_free_safety(300_000, 500);
+        assert_eq!(action_timeout, HandsFreeAction::AutoStopMaxDuration);
     }
 }

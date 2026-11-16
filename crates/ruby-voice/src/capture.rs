@@ -11,6 +11,13 @@ use crate::VoiceError;
 
 pub trait AudioSource: Send + Sync {
     fn start_recording(&mut self) -> Result<(), VoiceError>;
+    fn commit_recording(&mut self) -> Result<(), VoiceError> {
+        Ok(())
+    }
+    fn discard_recording(&mut self) -> Result<(), VoiceError> {
+        let _ = self.stop_recording();
+        Ok(())
+    }
     fn stop_recording(&mut self) -> Result<Vec<i16>, VoiceError>;
 }
 
@@ -200,7 +207,8 @@ impl AudioSource for CpalAudioCapture {
 /// Mock AudioSource providing deterministic synthetic audio for offline tests and CI.
 pub struct MockAudioSource {
     samples: Vec<i16>,
-    is_recording: bool,
+    pub is_recording: bool,
+    pub is_committed: bool,
 }
 
 impl Default for MockAudioSource {
@@ -214,6 +222,7 @@ impl Default for MockAudioSource {
         Self {
             samples,
             is_recording: false,
+            is_committed: false,
         }
     }
 }
@@ -223,6 +232,7 @@ impl MockAudioSource {
         Self {
             samples,
             is_recording: false,
+            is_committed: false,
         }
     }
 }
@@ -230,11 +240,85 @@ impl MockAudioSource {
 impl AudioSource for MockAudioSource {
     fn start_recording(&mut self) -> Result<(), VoiceError> {
         self.is_recording = true;
+        self.is_committed = false;
+        Ok(())
+    }
+
+    fn commit_recording(&mut self) -> Result<(), VoiceError> {
+        self.is_committed = true;
+        Ok(())
+    }
+
+    fn discard_recording(&mut self) -> Result<(), VoiceError> {
+        self.is_recording = false;
+        self.is_committed = false;
+        self.samples.clear();
         Ok(())
     }
 
     fn stop_recording(&mut self) -> Result<Vec<i16>, VoiceError> {
         self.is_recording = false;
+        self.is_committed = false;
         Ok(self.samples.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vad::trim_silence_vad;
+
+    #[test]
+    fn test_pre_roll_preserves_speech_within_50ms_of_keydown() {
+        // Speech starts at 30ms (sample 480 @ 16kHz)
+        // Samples 0..480: silence
+        // Samples 480..8000: active speech
+        let mut audio_fixture = vec![0i16; 480];
+        for i in 0..7520 {
+            audio_fixture.push(((i % 40) as i16 * 100) + 1000);
+        }
+
+        let mut mock_source = MockAudioSource::new(audio_fixture.clone());
+
+        // 1. Key-down arrives -> start pre-roll recording into ring buffer immediately
+        mock_source.start_recording().unwrap();
+        assert!(mock_source.is_recording);
+        assert!(!mock_source.is_committed);
+
+        // 2. 250ms threshold passes -> commit recording
+        mock_source.commit_recording().unwrap();
+        assert!(mock_source.is_committed);
+
+        // 3. User finishes talking -> stop recording
+        let recorded = mock_source.stop_recording().unwrap();
+        assert_eq!(recorded.len(), 8000);
+
+        // 4. VAD trims silence with 100ms leading padding:
+        // Because speech began at sample 480 (30ms) and lead_padding is 100ms (1600 samples),
+        // (start_idx * 320).saturating_sub(1600) evaluates to 0.
+        // Therefore, sample 0 of the pre-roll is retained and speech is not clipped.
+        let trimmed = trim_silence_vad(&recorded, 16000, 300.0);
+        assert!(!trimmed.is_empty(), "Trimmed audio should not be empty");
+        assert_eq!(
+            trimmed.as_ptr(),
+            recorded.as_ptr(),
+            "Audio starting within 50ms of key-down must retain start without clipping"
+        );
+    }
+
+    #[test]
+    fn test_pre_roll_discard_on_early_release() {
+        let mut mock_source = MockAudioSource::default();
+        mock_source.start_recording().unwrap();
+        assert!(mock_source.is_recording);
+
+        mock_source.discard_recording().unwrap();
+        assert!(!mock_source.is_recording);
+        assert!(!mock_source.is_committed);
+        let remaining = mock_source.stop_recording().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "Discarded pre-roll should clear audio buffer"
+        );
     }
 }

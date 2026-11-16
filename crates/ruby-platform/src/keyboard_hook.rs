@@ -188,8 +188,12 @@ impl KeyboardHookHandle {
                     while let Ok(mut event) = raw_rx.try_recv() {
                         event.timestamp_ms = now_ms;
 
-                        // Start-menu suppression: if Win key was pressed down, inject VK_NONAME
-                        if event.is_win() && !event.is_up {
+                        // Start-menu suppression: ONLY inject dummy key when dictation chord is active!
+                        if crate::hotkey_machine::should_inject_dummy_suppression(
+                            event,
+                            machine.ctrl_down,
+                            machine.win_down,
+                        ) {
                             inject_start_menu_suppression();
                         }
 

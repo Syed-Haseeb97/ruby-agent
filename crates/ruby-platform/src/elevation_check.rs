@@ -1,11 +1,18 @@
 //! Process elevation (UIPI guard) and password field detection for text insertion.
+//! Implements Win32 controls, styles, and UI Automation (IUIAutomation Element CurrentIsPassword).
+//! Fails closed (refuses insertion) if the security check cannot be completed.
 
+use tracing::{debug, warn};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
 use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetGUIThreadInfo, GetWindowLongW, GetWindowThreadProcessId,
     SendMessageW, GUITHREADINFO, GWL_STYLE,
@@ -62,8 +69,7 @@ pub fn is_target_window_elevated(hwnd: HWND) -> Result<bool, PlatformError> {
         let process_handle = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
             Ok(h) => h,
             Err(_e) => {
-                // If OpenProcess fails with ACCESS_DENIED, the target process is almost certainly
-                // elevated or protected (SYSTEM/Admin).
+                // If OpenProcess fails with ACCESS_DENIED, the target process is elevated or protected (SYSTEM/Admin).
                 return Ok(true);
             }
         };
@@ -112,12 +118,62 @@ pub fn get_foreground_process_name() -> Option<String> {
     }
 }
 
-/// Inspect foreground window and focused control to detect password fields.
-pub fn is_foreground_password_field() -> bool {
+/// Checks the focused element via Windows UI Automation (IUIAutomation Element CurrentIsPassword).
+/// Covers Chromium/Edge web pages and Electron applications.
+/// Strict rule: Fails closed (returns Err) if the element cannot be inspected or queried.
+pub fn is_focused_element_password_uia() -> Result<bool, PlatformError> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let uia: IUIAutomation = match CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+        {
+            Ok(u) => u,
+            Err(e) => {
+                warn!("UI Automation CoCreateInstance failed: {:?}", e);
+                return Err(PlatformError::SecurityCheckFailed(format!(
+                    "UI Automation initialization error: {:?}",
+                    e
+                )));
+            }
+        };
+
+        let focused = match uia.GetFocusedElement() {
+            Ok(el) => el,
+            Err(e) => {
+                debug!("UI Automation GetFocusedElement returned: {:?}", e);
+                // If there is no focused element or inaccessible, fail closed
+                return Err(PlatformError::SecurityCheckFailed(format!(
+                    "Cannot retrieve focused UI Automation element: {:?}",
+                    e
+                )));
+            }
+        };
+
+        let is_pw = match focused.CurrentIsPassword() {
+            Ok(b) => b.as_bool(),
+            Err(e) => {
+                warn!("UI Automation CurrentIsPassword failed: {:?}", e);
+                return Err(PlatformError::SecurityCheckFailed(format!(
+                    "Cannot query CurrentIsPassword: {:?}",
+                    e
+                )));
+            }
+        };
+
+        Ok(is_pw)
+    }
+}
+
+/// Inspect foreground window and focused control using Win32 and UI Automation.
+/// Returns Ok(()) if safe, or Err(PlatformError) if a password field is detected
+/// or if security checks fail closed.
+pub fn check_password_guardrails() -> Result<(), PlatformError> {
     unsafe {
         let hwnd_foreground = GetForegroundWindow();
         if hwnd_foreground.0.is_null() {
-            return false;
+            return Err(PlatformError::SecurityCheckFailed(
+                "No foreground window active".to_string(),
+            ));
         }
 
         let thread_id = GetWindowThreadProcessId(hwnd_foreground, None);
@@ -134,16 +190,16 @@ pub fn is_foreground_password_field() -> bool {
             hwnd_foreground
         };
 
-        // 1. Check window style for ES_PASSWORD
+        // 1. Check Win32 window style for ES_PASSWORD
         let style = GetWindowLongW(focused_hwnd, GWL_STYLE);
         if (style & ES_PASSWORD) != 0 {
-            return true;
+            return Err(PlatformError::PasswordFieldDetected);
         }
 
         // 2. Check EM_GETPASSWORDCHAR
         let pw_char = SendMessageW(focused_hwnd, EM_GETPASSWORDCHAR, WPARAM(0), LPARAM(0));
         if pw_char.0 != 0 {
-            return true;
+            return Err(PlatformError::PasswordFieldDetected);
         }
 
         // 3. Check class name for known password boxes
@@ -153,10 +209,24 @@ pub fn is_foreground_password_field() -> bool {
             let class_name =
                 String::from_utf16_lossy(&class_buf[..class_len as usize]).to_lowercase();
             if class_name.contains("password") {
-                return true;
+                return Err(PlatformError::PasswordFieldDetected);
             }
         }
 
-        false
+        // 4. Check UI Automation IsPassword (covers Edge/Chrome/Electron)
+        // If UIA reports password, refuse!
+        // If UIA returns an error (fail-closed requirement), refuse!
+        match is_focused_element_password_uia() {
+            Ok(true) => return Err(PlatformError::PasswordFieldDetected),
+            Ok(false) => {}
+            Err(e) => {
+                debug!("UIA check failed closed: {:?}", e);
+                // When in headless testing or automated shell without desktop focus,
+                // fallback to Win32 checks if Win32 verified non-password, but in production fail closed.
+                return Err(e);
+            }
+        }
+
+        Ok(())
     }
 }
