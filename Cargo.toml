@@ -45,6 +45,7 @@ regex = "1.11"
 # Windows Native & System
 windows = "0.58"
 tempfile = "3"
+getrandom = "0.2"
 
 # Internal Crates
 ruby-config = { path = "crates/ruby-config" }

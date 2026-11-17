@@ -273,7 +273,10 @@ async fn test_pairing_flow_success_expiry_and_wrong_code() {
     let expired_mgr = PairingManager::new();
     expired_mgr.set_code_for_test("654321", Duration::from_millis(5));
     tokio::time::sleep(Duration::from_millis(20)).await;
-    assert!(!expired_mgr.validate_code("654321"));
+    assert_eq!(
+        expired_mgr.validate_code("654321"),
+        ruby_remote::telegram::pairing::PairingResult::InvalidOrExpired
+    );
 
     // 2c. Successful pair
     let correct_update = serde_json::json!({
@@ -576,16 +579,202 @@ fn test_remote_off_when_no_token_or_disabled() {
     assert!(empty_token.is_none());
 }
 
-// 9. Opt-in live test
+// 9. Cap failed pairing attempts at 5
+#[tokio::test]
+async fn test_pairing_failed_attempts_capped_at_five() {
+    use ruby_remote::telegram::pairing::PairingResult;
+
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: None,
+    }));
+
+    let pairing_mgr = PairingManager::new();
+    pairing_mgr.set_code_for_test("123456", Duration::from_secs(300));
+
+    // Manager-level checks: 4 failed attempts keep code active; 5th invalidates
+    assert_eq!(
+        pairing_mgr.validate_code("000001"),
+        PairingResult::InvalidOrExpired
+    );
+    assert_eq!(
+        pairing_mgr.validate_code("000002"),
+        PairingResult::InvalidOrExpired
+    );
+    assert_eq!(
+        pairing_mgr.validate_code("000003"),
+        PairingResult::InvalidOrExpired
+    );
+    assert_eq!(
+        pairing_mgr.validate_code("000004"),
+        PairingResult::InvalidOrExpired
+    );
+    assert_eq!(
+        pairing_mgr.validate_code("000005"),
+        PairingResult::MaxAttemptsExceeded
+    );
+    // 6th attempt with correct code now fails because code was wiped!
+    assert_eq!(
+        pairing_mgr.validate_code("123456"),
+        PairingResult::InvalidOrExpired
+    );
+
+    // Adapter-level check: 5th attempt sends specific invalidation message
+    let pairing_mgr2 = PairingManager::new();
+    let (code2, _) = pairing_mgr2.get_or_generate_code();
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        pairing_mgr2,
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file),
+    );
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 4 wrong attempts
+    for i in 1..=4 {
+        let wrong = serde_json::json!({
+            "update_id": i,
+            "message": {
+                "message_id": 100 + i,
+                "from": { "id": 44444 },
+                "chat": { "id": 44444, "type": "private" },
+                "date": now_secs,
+                "text": format!("/pair 99999{}", i)
+            }
+        });
+        adapter.process_update(wrong, now_secs).await.unwrap();
+    }
+
+    // 5th wrong attempt triggers invalidation
+    let fifth_wrong = serde_json::json!({
+        "update_id": 5,
+        "message": {
+            "message_id": 105,
+            "from": { "id": 44444 },
+            "chat": { "id": 44444, "type": "private" },
+            "date": now_secs,
+            "text": "/pair 000000"
+        }
+    });
+    adapter.process_update(fifth_wrong, now_secs).await.unwrap();
+
+    {
+        let sent = mock.sent_messages.lock().unwrap();
+        assert_eq!(sent.len(), 5);
+        assert!(sent[4]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Pairing code invalidated after 5 failed attempts"));
+    }
+
+    // 6th attempt with original code is rejected
+    let sixth_correct = serde_json::json!({
+        "update_id": 6,
+        "message": {
+            "message_id": 106,
+            "from": { "id": 44444 },
+            "chat": { "id": 44444, "type": "private" },
+            "date": now_secs,
+            "text": format!("/pair {}", code2)
+        }
+    });
+    adapter
+        .process_update(sixth_correct, now_secs)
+        .await
+        .unwrap();
+    {
+        let sent = mock.sent_messages.lock().unwrap();
+        assert!(sent.last().unwrap()["text"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid or expired pairing code"));
+    }
+}
+
+// 10. Confirm pairing code and confirmation code use CSPRNG
+#[test]
+fn test_code_generators_use_csprng() {
+    use std::collections::HashSet;
+
+    let mut generated_6_digit = HashSet::new();
+    for _ in 0..100 {
+        let code = PairingManager::generate_secure_code_6_digits();
+        assert_eq!(code.len(), 6);
+        let num: u32 = code.parse().expect("must be a valid 6-digit number");
+        assert!((100_000..=999_999).contains(&num));
+        generated_6_digit.insert(code);
+    }
+    // CSPRNG must produce high entropy across 100 iterations (at least 90 distinct values)
+    assert!(
+        generated_6_digit.len() >= 90,
+        "CSPRNG must generate diverse non-colliding values"
+    );
+
+    let mut generated_4_digit = HashSet::new();
+    for _ in 0..100 {
+        let code = ConfirmationManager::generate_secure_code_4_digits();
+        assert_eq!(code.len(), 4);
+        let num: u32 = code.parse().expect("must be a valid 4-digit number");
+        assert!((1_000..=9_999).contains(&num));
+        generated_4_digit.insert(code);
+    }
+    assert!(
+        generated_4_digit.len() >= 80,
+        "CSPRNG must generate diverse 4-digit codes"
+    );
+}
+
+// 11. Environment variable fallback for bot token
+#[test]
+fn test_bot_token_env_fallback() {
+    let test_key = "TELEGRAM_BOT_TOKEN";
+    let test_token = format!("{}:{}", "123456789", "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R");
+
+    std::env::set_var(test_key, &test_token);
+    let resolved = ruby_remote::get_telegram_bot_token();
+    std::env::remove_var(test_key);
+
+    assert_eq!(resolved, Some(test_token));
+}
+
+// 12. Opt-in live test: sends one message to paired chat and prints reply latency
 #[cfg(feature = "live-telegram")]
 #[tokio::test]
 async fn test_live_telegram_roundtrip() {
-    let token =
-        std::env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN required for live test");
+    let token = std::env::var("TELEGRAM_BOT_TOKEN")
+        .expect("TELEGRAM_BOT_TOKEN environment variable required for live test");
+    let paired_chat_id: i64 = std::env::var("TELEGRAM_PAIRED_CHAT_ID")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .or_else(|| ruby_remote::load_remote_config().paired_user_id)
+        .expect("TELEGRAM_PAIRED_CHAT_ID env var or paired_user_id in ~/.ruby/remote_config.json required for live test");
+
     let client = TelegramClient::new(token);
-    let updates = client
-        .get_updates(None, Some(1))
-        .await
-        .expect("live getUpdates");
-    println!("Live updates count: {}", updates.len());
+    let ping_msg = format!("Ruby Live Test Ping [{}]", chrono::Utc::now().to_rfc3339());
+
+    let start = std::time::Instant::now();
+    let res = client.send_message(paired_chat_id, &ping_msg).await;
+    let latency = start.elapsed();
+
+    assert!(res.is_ok(), "Failed to send live message: {:?}", res.err());
+    println!(
+        "Live Telegram send_message to chat {} succeeded in {:?}",
+        paired_chat_id, latency
+    );
 }

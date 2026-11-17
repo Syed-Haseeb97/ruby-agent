@@ -20,6 +20,7 @@ chrono.workspace = true
 uuid.workspace = true
 regex.workspace = true
 windows = { workspace = true, features = ["Win32_System_Power", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

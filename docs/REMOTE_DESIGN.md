@@ -227,3 +227,23 @@ pub struct RemoteTask {
 ### Phase R2: Screen Capture & Visual Verification
 - **File Attachment Pipeline**: `ChannelAdapter::send_file` will send `.png` desktop snapshots captured by `ruby-platform` via Telegram's `sendDocument` / `sendPhoto`.
 - **Command Addition**: `/screen` command to capture and send current multi-monitor screenshot to phone.
+
+---
+
+## 9. Phase R0 Verification Matrix
+
+| Item | Scope | Implementation / Test Coverage | Verification Status |
+|:---|:---|:---|:---|
+| **1** | **ChannelAdapter Trait & Architecture** | `ChannelAdapter` async trait in `crates/ruby-remote/src/channel.rs`, clean state machine (`Queued`, `Running`, `NeedsInput`, `Done`, `Failed`, `Cancelled`), modular crate layout. | `compiles` |
+| **2** | **Long Polling & Offset Persistence** | `getUpdates` client with timeout, atomic offset persistence to `~/.ruby/remote_offset.json`. Tested via mock HTTP server across restarts. | `mock-level` (`test_restart_offset_persistence`) |
+| **3** | **Keyring Storage for Bot Token** | `keyring` crate resolution via `ruby_gemini::key_storage` with env fallback. Env fallback tested in unit test; live OS Credential Manager access not asserted in CI. | `UNVERIFIED` (Env fallback tested in `test_bot_token_env_fallback`; OS keyring interaction UNVERIFIED) |
+| **4** | **Ephemeral Pairing & 5-Attempt Cap** | `PairingManager` with 6-digit CSPRNG code (`getrandom`), 5-minute TTL, 5-failed-attempt invalidation, and rate-limited sender logging. | `mock-level` (`test_pairing_flow_success_expiry_and_wrong_code`, `test_pairing_failed_attempts_capped_at_five`, `test_code_generators_use_csprng`) |
+| **5** | **Numeric User ID Whitelist** | Non-whitelisted senders silently dropped without reply or detail leakage. Rate-limited warning logged without message body. | `mock-level` (`test_unknown_sender_ignored_silently`) |
+| **6** | **Task State Machine & Commands** | `/status` queries live Windows power state and uptime; `/tasks` returns last 5 tasks; plain text creates task and replies `"received, tool execution isn't enabled yet"`. | `mock-level` (`test_unknown_sender_ignored_silently`, `test_stop_cancels_all_active_tasks`) |
+| **7** | **Emergency Abort `/stop`** | Cancels all active (`Queued`, `Running`, `NeedsInput`) tasks immediately. Never fails or blocks. | `mock-level` (`test_stop_cancels_all_active_tasks`) |
+| **8** | **120-Second Message Staleness Drop** | Inbound messages with timestamp older than 120s dropped immediately without execution; reply informs user laptop was offline. | `mock-level` (`test_stale_message_dropped`) |
+| **9** | **Destructive Confirmation Plumbing** | `ConfirmationManager` with 4-digit CSPRNG code (`getrandom`), 120s TTL, `/yes <code>` validation, and `/no` cancellation. | `mock-level` (`test_confirmation_plumbing`) |
+| **10** | **Token Redaction & Audit Trail** | Bot tokens redacted in logs and error replies via `redact_sensitive_content`. Append-only audit logger records events to `~/.ruby/remote_audit.log`. | `mock-level` (`test_bot_token_redaction`, `test_unknown_sender_ignored_silently`) |
+| **11** | **Zero Execution & Clean CI** | Zero child processes or file execution primitives in crate. `cargo fmt --check` (0 diff), `cargo clippy` (0 warnings), workspace tests pass. | `VERIFIED` (`git grep` 0 hits in `src/`, CI `cargo clippy`, `cargo test`) |
+| **12** | **Opt-in Live Telegram Roundtrip** | Live Telegram API smoke test under `#[cfg(feature = "live-telegram")]` in `tests/mock_telegram_tests.rs`. Requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. | `mock-level` (in default CI); `VERIFIED` when run with `--features live-telegram` and live credentials |
+

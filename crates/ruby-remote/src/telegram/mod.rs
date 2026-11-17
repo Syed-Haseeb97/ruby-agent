@@ -24,7 +24,7 @@ use crate::traits::{ChannelAdapter, RemoteCommandHandler};
 use crate::types::{RemoteError, RemoteStatus, TaskState};
 
 use self::client::TelegramClient;
-use self::pairing::PairingManager;
+use self::pairing::{PairingManager, PairingResult};
 use self::rate_limiter::SenderRateLimiter;
 
 pub const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4000;
@@ -215,35 +215,75 @@ impl TelegramAdapter {
                 let parts: Vec<&str> = raw_text.split_whitespace().collect();
                 if parts.len() == 2 {
                     let code = parts[1];
-                    if self.pairing_mgr.validate_code(code) {
-                        if let Ok(mut lock) = self.config.lock() {
-                            lock.paired_user_id = Some(sender_id);
-                            let _ = save_remote_config(&lock);
+                    match self.pairing_mgr.validate_code(code) {
+                        PairingResult::Success => {
+                            if let Ok(mut lock) = self.config.lock() {
+                                lock.paired_user_id = Some(sender_id);
+                                let _ = save_remote_config(&lock);
+                            }
+                            self.audit_logger
+                                .log_entry(sender_id, None, "pair", "success");
+                            info!(
+                                "Telegram bot paired successfully with user ID: {}",
+                                sender_id
+                            );
+                            self.send_redacted_reply(
+                                chat_id,
+                                "✅ Paired successfully with Ruby Assistant.\nUse /help to view available commands.",
+                            )
+                            .await?;
+                            return Ok(Some(update_id));
                         }
-                        self.audit_logger
-                            .log_entry(sender_id, None, "pair", "success");
-                        info!(
-                            "Telegram bot paired successfully with user ID: {}",
-                            sender_id
-                        );
-                        self.send_redacted_reply(
-                            chat_id,
-                            "✅ Paired successfully with Ruby Assistant.\nUse /help to view available commands.",
-                        ).await?;
-                        return Ok(Some(update_id));
+                        PairingResult::MaxAttemptsExceeded => {
+                            self.audit_logger.log_entry(
+                                sender_id,
+                                None,
+                                "pair",
+                                "invalidated_max_attempts_exceeded",
+                            );
+                            warn!(
+                                "Pairing code invalidated after 5 failed attempts from sender ID: {}",
+                                sender_id
+                            );
+                            self.send_redacted_reply(
+                                chat_id,
+                                "❌ Pairing code invalidated after 5 failed attempts. Please generate a new code in the Ruby Assistant Console.",
+                            )
+                            .await?;
+                            return Ok(Some(update_id));
+                        }
+                        PairingResult::InvalidOrExpired => {
+                            self.audit_logger.log_entry(
+                                sender_id,
+                                None,
+                                "pair",
+                                "invalid_or_expired_code",
+                            );
+                            warn!(
+                                "Rejected invalid or expired pairing attempt from sender ID: {}",
+                                sender_id
+                            );
+                            self.send_redacted_reply(
+                                chat_id,
+                                "❌ Invalid or expired pairing code. Please generate a fresh code in the Ruby Assistant Console.",
+                            )
+                            .await?;
+                            return Ok(Some(update_id));
+                        }
                     }
                 }
-                // Invalid or expired code
+                // Malformed /pair command
                 self.audit_logger
                     .log_entry(sender_id, None, "pair", "invalid_or_expired_code");
                 warn!(
-                    "Rejected invalid or expired pairing attempt from sender ID: {}",
+                    "Rejected malformed pairing attempt from sender ID: {}",
                     sender_id
                 );
                 self.send_redacted_reply(
                     chat_id,
                     "❌ Invalid or expired pairing code. Please generate a fresh code in the Ruby Assistant Console.",
-                ).await?;
+                )
+                .await?;
                 return Ok(Some(update_id));
             }
 

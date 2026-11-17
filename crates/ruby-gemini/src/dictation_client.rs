@@ -113,18 +113,30 @@ pub fn is_daily_quota_exhausted(status: reqwest::StatusCode, body: &str) -> bool
     if status.as_u16() != 429 {
         return false;
     }
-    // 1. Inspect structured Google QuotaFailure details
+    // Inspect structured Google QuotaFailure details
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(details) = val["error"]["details"].as_array() {
             for detail in details {
                 if let Some(violations) = detail["violations"].as_array() {
                     for v in violations {
-                        if let Some(desc) = v["description"].as_str() {
-                            let lower = desc.to_ascii_lowercase();
+                        // Check description, quota ID/quotaId, metric, and subject fields for per-day limits
+                        let candidates = [
+                            v["description"].as_str(),
+                            v["quotaId"].as_str(),
+                            v["quota_id"].as_str(),
+                            v["subject"].as_str(),
+                            v["metric"].as_str(),
+                            v["id"].as_str(),
+                        ];
+                        for candidate in candidates.into_iter().flatten() {
+                            let lower = candidate.to_ascii_lowercase();
                             if (lower.contains("per day")
+                                || lower.contains("per_day")
                                 || lower.contains("perday")
-                                || lower.contains("daily"))
+                                || lower.contains("daily")
+                                || lower.contains("per-day"))
                                 && !lower.contains("per minute")
+                                && !lower.contains("per_minute")
                             {
                                 return true;
                             }
@@ -134,12 +146,9 @@ pub fn is_daily_quota_exhausted(status: reqwest::StatusCode, body: &str) -> bool
             }
         }
     }
-    // 2. Strict fallback for unstructured bodies: require explicit daily quota metric identifiers
-    let lower = body.to_ascii_lowercase();
-    (lower.contains("requests per day")
-        || lower.contains("requests_per_day")
-        || (lower.contains("quota metric") && lower.contains("per day")))
-        && !lower.contains("per minute")
+    // If details are absent or unparseable, return false so the caller treats the 429
+    // as a short cooldown (e.g. 60s) rather than triggering a 30-minute key lockout.
+    false
 }
 
 #[async_trait]
@@ -1529,8 +1538,8 @@ mod tests {
                 tokio::spawn(async move {
                     let _ = read_http_request(&mut socket).await;
                     g_hits.fetch_add(1, Ordering::SeqCst);
-                    // Google returns 429 Daily Quota Exhaustion
-                    let body = r#"{"error":{"code":429,"message":"Quota exceeded for quota metric 'Generate Content API requests per day' of service 'generativelanguage.googleapis.com'","status":"RESOURCE_EXHAUSTED"}}"#;
+                    // Google returns 429 Daily Quota Exhaustion with structured QuotaFailure
+                    let body = r#"{"error":{"code":429,"message":"Quota exceeded for quota metric 'Generate Content API requests per day' of service 'generativelanguage.googleapis.com'","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"description":"Quota exceeded for quota metric 'Generate Content API requests per day' of service 'generativelanguage.googleapis.com'","quotaId":"GenerateRequestsPerDayPerProject"}]}]}}"#;
                     let resp = format!(
                         "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
@@ -1983,5 +1992,153 @@ mod tests {
                 "Must not output an assistant response"
             );
         }
+    }
+
+    #[test]
+    fn test_quota_id_field_triggers_daily_exhaustion() {
+        use reqwest::StatusCode;
+
+        // Structured QuotaFailure with quotaId field
+        let body_quota_id = r#"{
+            "error": {
+                "code": 429,
+                "message": "Resource has been exhausted (e.g. check quota).",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {
+                                "subject": "project:123456",
+                                "quotaId": "GenerateRequestsPerDayPerProject"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        assert!(is_daily_quota_exhausted(
+            StatusCode::TOO_MANY_REQUESTS,
+            body_quota_id
+        ));
+
+        // Structured QuotaFailure with subject field containing per-day
+        let body_subject = r#"{
+            "error": {
+                "code": 429,
+                "details": [
+                    {
+                        "violations": [
+                            {
+                                "subject": "limit:generate_content_per_day"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        assert!(is_daily_quota_exhausted(
+            StatusCode::TOO_MANY_REQUESTS,
+            body_subject
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_absent_or_unparseable_quota_details_treated_as_short_cooldown() {
+        use reqwest::StatusCode;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        // 1. Function unit check: absent details or unparseable raw body returns false
+        let unparseable_body = "429 Too Many Requests: Rate limit exceeded";
+        assert!(!is_daily_quota_exhausted(
+            StatusCode::TOO_MANY_REQUESTS,
+            unparseable_body
+        ));
+
+        let absent_details_body = r#"{"error":{"code":429,"message":"Rate limit exceeded"}}"#;
+        assert!(!is_daily_quota_exhausted(
+            StatusCode::TOO_MANY_REQUESTS,
+            absent_details_body
+        ));
+
+        let empty_details_body = r#"{"error":{"code":429,"details":[]}}"#;
+        assert!(!is_daily_quota_exhausted(
+            StatusCode::TOO_MANY_REQUESTS,
+            empty_details_body
+        ));
+
+        // 2. Client-level test: unparseable 429 marks primary unhealthy (short cooldown), but does NOT trigger 30m key lockout
+        let google_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let google_port = google_listener.local_addr().unwrap().port();
+        let google_base_url = format!("http://127.0.0.1:{}", google_port);
+
+        let primary_hits = Arc::new(AtomicUsize::new(0));
+        let fallback_hits = Arc::new(AtomicUsize::new(0));
+        let p_hits = Arc::clone(&primary_hits);
+        let f_hits = Arc::clone(&fallback_hits);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match google_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                let f_hits = Arc::clone(&f_hits);
+
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+
+                    if req_str.contains("gemini-3.8-flash") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        // Return 429 without structured QuotaFailure details
+                        let resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nContent-Length: 19\r\nConnection: close\r\n\r\nRate limit exceeded";
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("gemini-3-flash-preview") {
+                        f_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Fallback response"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake-key".to_string()),
+            Some(google_base_url),
+            TimeoutConfig::default(),
+            None,
+            false,
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Fallback response");
+        assert_eq!(primary_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_hits.load(Ordering::SeqCst), 1);
+
+        // Primary is marked unhealthy for short 60s cooldown
+        assert!(
+            client.is_primary_unhealthy(),
+            "Primary must be marked unhealthy for short cooldown"
+        );
+        // Key lockout is NOT triggered
+        assert!(
+            !client.is_google_key_exhausted(),
+            "Key must NOT be locked out for 30m when details are absent or unparseable"
+        );
     }
 }

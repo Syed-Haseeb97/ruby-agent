@@ -33,18 +33,18 @@ impl ConfirmationManager {
         }
     }
 
+    /// Generates a cryptographically secure 4-digit code using OS CSPRNG.
+    pub fn generate_secure_code_4_digits() -> String {
+        let mut bytes = [0u8; 4];
+        getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+        let num = u32::from_ne_bytes(bytes);
+        let code = (num % 9_000) + 1_000;
+        format!("{:04}", code)
+    }
+
     /// Registers a pending action and returns the random 4-digit code.
     pub fn register_action(&self, action_id: &str, description: &str) -> String {
-        // Generate random 4-digit code [1000..9999]
-        let code = format!(
-            "{:04}",
-            (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
-                % 9000)
-                + 1000
-        );
+        let code = Self::generate_secure_code_4_digits();
 
         let now = Instant::now();
         let action = PendingAction {
