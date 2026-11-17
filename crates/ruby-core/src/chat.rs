@@ -67,10 +67,7 @@ static SUPPORT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// Normalizes an input string to one of the seven supported Ruby emotions,
 /// resolving aliases and defaulting safely to `Neutral`.
 pub fn normalize_emotion(value: &str) -> Emotion {
-    let cleaned = value
-        .trim()
-        .to_ascii_lowercase()
-        .replace(['-', ' '], "_");
+    let cleaned = value.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     match cleaned.as_str() {
         "happy" | "joyful" => Emotion::Happy,
         "excited" | "enthusiastic" => Emotion::Excited,
