@@ -104,6 +104,11 @@ impl SystemDictationEngine {
         *self.state.read().await
     }
 
+    /// Returns the backend identifier that served the latest dictation (if supported).
+    pub fn last_served_backend(&self) -> Option<String> {
+        self.dictation_client.last_served_backend()
+    }
+
     /// Starts pre-roll audio buffering immediately on Ctrl+Win key-down.
     /// Dictation state remains Idle so no UI change or recording cue occurs until committed.
     pub async fn start_pre_roll(&self) -> Result<(), DictationError> {

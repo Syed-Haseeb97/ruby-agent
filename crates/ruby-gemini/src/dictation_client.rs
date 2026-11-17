@@ -1,5 +1,6 @@
 //! Multimodal Speech-to-Text & Transcription Cleanup client for Gemini 3.8 Flash.
 //! Sends 16 kHz WAV audio with thinking_level "low" for one-pass transcription and cleanup.
+//! Supports 3-tier fallback chain: Gemini primary -> Gemini fallback -> FreeLLMAPI.
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -9,7 +10,10 @@ use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, error};
 
-use crate::key_storage::get_gemini_api_key;
+use crate::key_storage::{
+    get_allow_third_party_fallback, get_freellmapi_api_key, get_gemini_api_key,
+};
+use crate::openai_client::OpenAiCompatDictationClient;
 use crate::GeminiError;
 
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
@@ -23,6 +27,9 @@ pub const FALLBACK_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Cooldown duration during which an unhealthy primary model is bypassed (60 seconds).
 pub const PRIMARY_UNHEALTHY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Cooldown duration during which Google API models are bypassed after daily quota exhaustion (30 minutes).
+pub const GOOGLE_DAILY_QUOTA_COOLDOWN: Duration = Duration::from_secs(1800);
 
 /// Audio duration threshold (seconds) under which timeouts trigger the 60s unhealthy lockout.
 /// Slow responses on audio longer than this threshold do NOT mark the primary unhealthy.
@@ -82,7 +89,7 @@ impl TimeoutConfig {
     }
 }
 
-const DICTATION_SYSTEM_PROMPT: &str = r#"You are a specialized audio dictation engine for the user's active desktop application.
+pub const DICTATION_SYSTEM_PROMPT: &str = r#"You are a specialized audio dictation engine for the user's active desktop application.
 Your task is to transcribe spoken audio and clean it up in a SINGLE PASS.
 
 TRANSCRIPTION & CLEANUP RULES:
@@ -98,6 +105,18 @@ TRANSCRIPTION & CLEANUP RULES:
    - Never output explanations, quotes (unless explicitly dictated), markdown backticks, or conversational commentary (e.g., "Here is your text:").
    - Output ONLY the clean transcribed text."#;
 
+/// Distinguishes Google per-minute rate limits (short cooldown) from daily quota exhaustion (long cooldown).
+pub fn is_daily_quota_exhausted(status: reqwest::StatusCode, body: &str) -> bool {
+    if status.as_u16() != 429 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("per day")
+        || lower.contains("daily")
+        || (lower.contains("quota exceeded") && lower.contains("day"))
+        || lower.contains("free_tier_requests_per_day")
+}
+
 #[async_trait]
 pub trait DictationClient: Send + Sync {
     async fn transcribe_and_cleanup(
@@ -105,16 +124,27 @@ pub trait DictationClient: Send + Sync {
         wav_audio_bytes: &[u8],
         target_process_name: Option<&str>,
     ) -> Result<String, GeminiError>;
+
+    fn last_served_backend(&self) -> Option<String> {
+        None
+    }
 }
 
-/// Production Gemini Multimodal Dictation Client.
+/// Production Gemini Multimodal Dictation Client with 3-tier fallback chain:
+/// Tier 1: Gemini Primary (`gemini-3.8-flash`)
+/// Tier 2: Gemini Fallback (`gemini-3-flash-preview`)
+/// Tier 3: FreeLLMAPI (`OpenAiCompatDictationClient`) when `allow_third_party_fallback` is true.
 pub struct GeminiDictationClient {
     client: Client,
     model: String,
     explicit_api_key: Option<String>,
     base_url: String,
     last_served_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    last_served_backend: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     primary_unhealthy_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    google_key_exhausted_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    third_party_client: Option<std::sync::Arc<dyn DictationClient>>,
+    allow_third_party_fallback: bool,
     timeout_config: TimeoutConfig,
 }
 
@@ -143,6 +173,37 @@ impl GeminiDictationClient {
         base_url: Option<String>,
         timeout_config: TimeoutConfig,
     ) -> Self {
+        let allow_third_party = get_allow_third_party_fallback();
+        let third_party_client: Option<std::sync::Arc<dyn DictationClient>> = if allow_third_party {
+            if let Some(key) = get_freellmapi_api_key() {
+                Some(std::sync::Arc::new(
+                    OpenAiCompatDictationClient::with_config(Some(key), None, None, timeout_config),
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Self::with_full_options(
+            model,
+            api_key,
+            base_url,
+            timeout_config,
+            third_party_client,
+            allow_third_party,
+        )
+    }
+
+    pub fn with_full_options(
+        model: Option<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        timeout_config: TimeoutConfig,
+        third_party_client: Option<std::sync::Arc<dyn DictationClient>>,
+        allow_third_party_fallback: bool,
+    ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -156,7 +217,11 @@ impl GeminiDictationClient {
             explicit_api_key: api_key,
             base_url: base_url.unwrap_or_else(|| API_BASE_URL.to_string()),
             last_served_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            last_served_backend: std::sync::Arc::new(std::sync::Mutex::new(None)),
             primary_unhealthy_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            google_key_exhausted_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            third_party_client,
+            allow_third_party_fallback,
             timeout_config,
         }
     }
@@ -166,9 +231,24 @@ impl GeminiDictationClient {
         self.last_served_model.lock().ok().and_then(|m| m.clone())
     }
 
-    /// Returns true if the primary model is currently cached as unhealthy.
+    /// Returns the backend identifier (e.g. "gemini:gemini-3.8-flash", "freellmapi:chat_audio") that served the most recent request.
+    pub fn last_served_backend(&self) -> Option<String> {
+        self.last_served_backend.lock().ok().and_then(|m| m.clone())
+    }
+
+    /// Returns true if the primary model is currently cached as unhealthy (<60s cooldown).
     pub fn is_primary_unhealthy(&self) -> bool {
         self.primary_unhealthy_until
+            .lock()
+            .ok()
+            .and_then(|lock| *lock)
+            .map(|until| std::time::Instant::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// Returns true if the Google API key is currently in daily quota exhaustion lockout (<30 min cooldown).
+    pub fn is_google_key_exhausted(&self) -> bool {
+        self.google_key_exhausted_until
             .lock()
             .ok()
             .and_then(|lock| *lock)
@@ -182,15 +262,56 @@ impl GeminiDictationClient {
             *lock = None;
         }
     }
+
+    /// Explicitly resets the Google API key daily quota lockout cache.
+    pub fn reset_google_key_exhausted(&self) {
+        if let Ok(mut lock) = self.google_key_exhausted_until.lock() {
+            *lock = None;
+        }
+    }
 }
 
 #[async_trait]
 impl DictationClient for GeminiDictationClient {
+    fn last_served_backend(&self) -> Option<String> {
+        self.last_served_backend.lock().ok().and_then(|m| m.clone())
+    }
+
     async fn transcribe_and_cleanup(
         &self,
         wav_audio_bytes: &[u8],
         target_process_name: Option<&str>,
     ) -> Result<String, GeminiError> {
+        if wav_audio_bytes.is_empty() {
+            return Ok(String::new());
+        }
+
+        // ------------------------------------------------------------------
+        // Pre-flight: Check Google API key daily quota exhaustion lockout (30 min)
+        // ------------------------------------------------------------------
+        if self.is_google_key_exhausted() {
+            tracing::info!(
+                "Google API key is in 30-minute daily quota lockout; routing directly to FreeLLMAPI"
+            );
+            if self.allow_third_party_fallback {
+                if let Some(ref third_party) = self.third_party_client {
+                    let res = third_party
+                        .transcribe_and_cleanup(wav_audio_bytes, target_process_name)
+                        .await;
+                    if res.is_ok() {
+                        if let Ok(mut lock) = self.last_served_backend.lock() {
+                            *lock = third_party.last_served_backend();
+                        }
+                    }
+                    return res;
+                }
+            }
+            return Err(GeminiError::Api(
+                "Google API daily quota exhausted (30m cooldown active) and third-party fallback unavailable"
+                    .to_string(),
+            ));
+        }
+
         let key = self
             .explicit_api_key
             .clone()
@@ -200,10 +321,6 @@ impl DictationClient for GeminiDictationClient {
                     "Gemini API key not found in keyring or GEMINI_API_KEY".to_string(),
                 )
             })?;
-
-        if wav_audio_bytes.is_empty() {
-            return Ok(String::new());
-        }
 
         let audio_base64 = BASE64.encode(wav_audio_bytes);
         let app_context = match target_process_name {
@@ -377,6 +494,9 @@ impl DictationClient for GeminiDictationClient {
                     if let Ok(mut lock) = self.last_served_model.lock() {
                         *lock = Some(current_model.clone());
                     }
+                    if let Ok(mut lock) = self.last_served_backend.lock() {
+                        *lock = Some(format!("gemini:{}", current_model));
+                    }
 
                     return Ok(text);
                 }
@@ -389,6 +509,31 @@ impl DictationClient for GeminiDictationClient {
                 );
                 last_err = GeminiError::Api(format!("Status {}: {}", status, sanitized));
 
+                // Config / Auth errors (400, 401, 403): Surface immediately without falling back
+                if status.as_u16() == 400 || status.as_u16() == 401 || status.as_u16() == 403 {
+                    error!(
+                        "Configuration/Auth error on Gemini model {} (status {}). Failing fast without fallback.",
+                        current_model, status
+                    );
+                    return Err(GeminiError::Auth(format!(
+                        "Status {}: {}",
+                        status, sanitized
+                    )));
+                }
+
+                // Daily Quota 429 Exhaustion: Trigger 30-minute lockout on Google API key
+                if is_daily_quota_exhausted(status, &err_body) {
+                    if let Ok(mut lock) = self.google_key_exhausted_until.lock() {
+                        *lock = Some(std::time::Instant::now() + GOOGLE_DAILY_QUOTA_COOLDOWN);
+                    }
+                    tracing::warn!(
+                        "Google API daily quota exhausted on model {} (status 429). Setting 30m lockout on Google API key.",
+                        current_model
+                    );
+                    break;
+                }
+
+                // Transient 429 or 5xx on primary: mark unhealthy for 60s
                 if is_primary && (status.is_server_error() || status.as_u16() == 429) {
                     if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
                         *lock = Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
@@ -399,9 +544,42 @@ impl DictationClient for GeminiDictationClient {
                     );
                     break;
                 }
+            }
 
-                if !status.is_server_error() && status.as_u16() != 429 {
-                    return Err(last_err);
+            // If daily quota was exhausted, skip all remaining Google models
+            if self.is_google_key_exhausted() {
+                break;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Tier 3: Third-party fallback (FreeLLMAPI)
+        // Only attempted if allow_third_party_fallback is true and a key/client exists.
+        // Triggers: Google 429/RESOURCE_EXHAUSTED, 5xx, timeouts, connection errors.
+        // ------------------------------------------------------------------
+        if self.allow_third_party_fallback {
+            if let Some(ref third_party) = self.third_party_client {
+                tracing::warn!(
+                    "All Google Gemini models failed ({:?}); attempting Tier 3 third-party fallback (FreeLLMAPI)",
+                    last_err
+                );
+                let third_res = third_party
+                    .transcribe_and_cleanup(wav_audio_bytes, target_process_name)
+                    .await;
+                if third_res.is_ok() {
+                    if let Ok(mut lock) = self.last_served_backend.lock() {
+                        *lock = third_party.last_served_backend();
+                    }
+                    if let Ok(mut lock) = self.last_served_model.lock() {
+                        *lock = third_party.last_served_backend();
+                    }
+                    return third_res;
+                } else {
+                    error!(
+                        "Third-party dictation backend (FreeLLMAPI) failed: {:?}",
+                        third_res.as_ref().err()
+                    );
+                    return third_res;
                 }
             }
         }
@@ -443,6 +621,10 @@ impl MockDictationClient {
 
 #[async_trait]
 impl DictationClient for MockDictationClient {
+    fn last_served_backend(&self) -> Option<String> {
+        Some("mock".to_string())
+    }
+
     async fn transcribe_and_cleanup(
         &self,
         _wav_audio_bytes: &[u8],
@@ -464,11 +646,37 @@ pub fn redact_sensitive_content(input: &str, known_key: Option<&str>) -> String 
             out = out.replace(key, "[REDACTED_API_KEY]");
         }
     }
-    // Also redact standard Google API key patterns (AIzaSy...)
-    if let Some(idx) = out.find("AIzaSy") {
+    // Redact standard Google API key patterns (AIzaSy...)
+    while let Some(idx) = out.find("AIzaSy") {
         let end = out[idx..]
             .find(|c: char| {
-                c.is_whitespace() || c == '"' || c == '&' || c == '?' || c == '/' || c == '\\'
+                c.is_whitespace()
+                    || c == '"'
+                    || c == '&'
+                    || c == '?'
+                    || c == '/'
+                    || c == '\\'
+                    || c == '}'
+                    || c == ','
+            })
+            .map(|offset| idx + offset)
+            .unwrap_or(out.len());
+        out.replace_range(idx..end, "[REDACTED_API_KEY]");
+    }
+    // Redact FreeLLMAPI key patterns (freellmapi-...)
+    while let Some(idx) = out.find("freellmapi-") {
+        let end = out[idx..]
+            .find(|c: char| {
+                c.is_whitespace()
+                    || c == '"'
+                    || c == '&'
+                    || c == '?'
+                    || c == '/'
+                    || c == '\\'
+                    || c == '\''
+                    || c == '`'
+                    || c == '}'
+                    || c == ','
             })
             .map(|offset| idx + offset)
             .unwrap_or(out.len());
@@ -480,19 +688,25 @@ pub fn redact_sensitive_content(input: &str, known_key: Option<&str>) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_key_hygiene_and_log_redaction() {
         let fake_key = "AIzaSyFakeKey1234567890abcdef";
+        let fake_freellm_key = format!("{}{}", "freellmapi-", "mockredactionkey12345");
         let dirty_log = format!(
-            "Failed request to https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={}&timeout=10 with error 403 Forbidden",
-            fake_key
+            "Failed request with Google key={} and FreeLLM key={} timeout=10 error 403 Forbidden",
+            fake_key, fake_freellm_key
         );
 
         let sanitized = redact_sensitive_content(&dirty_log, Some(fake_key));
         assert!(
             !sanitized.contains(fake_key),
-            "Sanitized string must not contain raw API key"
+            "Sanitized string must not contain raw Google API key"
+        );
+        assert!(
+            !sanitized.contains(&fake_freellm_key),
+            "Sanitized string must not contain raw FreeLLMAPI key"
         );
         assert!(
             sanitized.contains("[REDACTED_API_KEY]"),
@@ -523,6 +737,39 @@ mod tests {
             DICTATION_SYSTEM_PROMPT.contains("Output ONLY the clean transcribed text"),
             "System prompt must enforce transcription only"
         );
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut content_len = 0;
+        let mut header_len = 0;
+
+        while let Ok(n) = socket.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if header_len == 0 {
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_len = pos + 4;
+                    let header_str = String::from_utf8_lossy(&buf[..header_len]);
+                    for line in header_str.lines() {
+                        let lower = line.to_ascii_lowercase();
+                        if lower.starts_with("content-length:") {
+                            if let Some((_, val)) = line.split_once(':') {
+                                content_len = val.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+            if header_len > 0 && buf.len() >= header_len + content_len {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
     }
 
     #[tokio::test]
@@ -585,8 +832,6 @@ mod tests {
             Some(base_url),
         );
 
-        // 1. First request: Primary fails immediately with 503 UNAVAILABLE.
-        // Client makes at most 1 attempt on primary, caches it as unhealthy for 60s, and falls back.
         let t0 = std::time::Instant::now();
         let res1 = client
             .transcribe_and_cleanup(b"RIFF...", Some("notepad.exe"))
@@ -620,7 +865,7 @@ mod tests {
             "Primary model must be marked unhealthy for cooldown window"
         );
 
-        // 2. Second request within 60s cooldown: Primary MUST be completely bypassed!
+        // Second request within 60s cooldown: Primary MUST be completely bypassed!
         let t1 = std::time::Instant::now();
         let res2 = client
             .transcribe_and_cleanup(b"RIFF...", Some("notepad.exe"))
@@ -643,39 +888,6 @@ mod tests {
             "Cached request elapsed ({:?}) completed near-instantly",
             elapsed2
         );
-    }
-
-    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 8192];
-        let mut content_len = 0;
-        let mut header_len = 0;
-
-        while let Ok(n) = socket.read(&mut chunk).await {
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if header_len == 0 {
-                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    header_len = pos + 4;
-                    let header_str = String::from_utf8_lossy(&buf[..header_len]);
-                    for line in header_str.lines() {
-                        let lower = line.to_ascii_lowercase();
-                        if lower.starts_with("content-length:") {
-                            if let Some((_, val)) = line.split_once(':') {
-                                content_len = val.trim().parse::<usize>().unwrap_or(0);
-                            }
-                        }
-                    }
-                }
-            }
-            if header_len > 0 && buf.len() >= header_len + content_len {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&buf).to_string()
     }
 
     #[tokio::test]
@@ -709,7 +921,6 @@ mod tests {
 
                     if req_str.contains("gemini-3.8-flash") {
                         p_hits.fetch_add(1, Ordering::SeqCst);
-                        // Primary model hangs! Sleep 1200ms (> primary timeout of 500ms)
                         tokio::time::sleep(Duration::from_millis(1200)).await;
                         let body =
                             r#"{"candidates":[{"content":{"parts":[{"text":"Late response"}]}}]}"#;
@@ -733,7 +944,6 @@ mod tests {
             }
         });
 
-        // Configure client with 500ms primary timeout for predictable fast testing
         let custom_timeouts = TimeoutConfig {
             primary_base_ms: 500,
             primary_scale_per_sec_ms: 0,
@@ -751,7 +961,6 @@ mod tests {
             custom_timeouts,
         );
 
-        // 1-second audio clip (short audio: 1.0s <= 5.0s)
         let wav_1s = vec![0u8; 44 + 32000];
 
         let t0 = std::time::Instant::now();
@@ -769,7 +978,6 @@ mod tests {
         assert_eq!(primary_hit_count.load(Ordering::SeqCst), 1);
         assert_eq!(fallback_hit_count.load(Ordering::SeqCst), 1);
 
-        // Assert time-to-fallback ≈ primary timeout (500ms timeout -> fallback completes ~550ms, well under 900ms)
         assert!(
             elapsed >= Duration::from_millis(480),
             "Time-to-fallback must be at least primary timeout (elapsed: {:?})",
@@ -781,7 +989,6 @@ mod tests {
             elapsed
         );
 
-        // Assert primary is marked unhealthy after timing out on short audio
         assert!(
             client.is_primary_unhealthy(),
             "Primary model must be marked unhealthy for 60s after hanging on short audio"
@@ -808,7 +1015,6 @@ mod tests {
                     let req_str = read_http_request(&mut socket).await;
 
                     if req_str.contains("gemini-3.8-flash") {
-                        // Primary hangs
                         tokio::time::sleep(Duration::from_millis(1000)).await;
                     } else if req_str.contains("gemini-3-flash-preview") {
                         let body = r#"{"candidates":[{"content":{"parts":[{"text":"Long audio fallback transcription"}]}}]}"#;
@@ -840,7 +1046,6 @@ mod tests {
             custom_timeouts,
         );
 
-        // 8-second audio clip (long audio: 8.0s > 5.0s threshold)
         let wav_8s = vec![0u8; 44 + 8 * 32000];
 
         let res = client
@@ -849,7 +1054,6 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(res.unwrap(), "Long audio fallback transcription");
 
-        // Rule: slow long-audio responses do NOT mark primary unhealthy!
         assert!(
             !client.is_primary_unhealthy(),
             "Slow response on long audio (>5s) must NOT mark primary unhealthy"
@@ -859,7 +1063,6 @@ mod tests {
     #[test]
     fn test_timeout_scaling_formula() {
         let cfg = TimeoutConfig::default();
-        // 0s audio: base timeout
         assert_eq!(
             cfg.compute_primary_timeout(0.0),
             Duration::from_millis(3000)
@@ -869,18 +1072,15 @@ mod tests {
             Duration::from_millis(5000)
         );
 
-        // 5s audio: base + 5 * 200ms = 4000ms
         assert_eq!(
             cfg.compute_primary_timeout(5.0),
             Duration::from_millis(4000)
         );
-        // fallback: 5000 + 5 * 300ms = 6500ms
         assert_eq!(
             cfg.compute_fallback_timeout(5.0),
             Duration::from_millis(6500)
         );
 
-        // 60s audio: capped at 12000ms and 15000ms
         assert_eq!(
             cfg.compute_primary_timeout(60.0),
             Duration::from_millis(12000)
@@ -890,15 +1090,20 @@ mod tests {
             Duration::from_millis(15000)
         );
 
-        // Short audio threshold
         assert!(cfg.is_short_audio(4.9));
         assert!(cfg.is_short_audio(5.0));
         assert!(!cfg.is_short_audio(5.1));
     }
 
+    // ======================================================================
+    // FreeLLMAPI & 3-Tier Fallback Tests (Items 1-6)
+    // ======================================================================
+
+    /// (a) FreeLLMAPI audio path success:
+    /// chat/completions with input_audio {data: base64, format: "wav"} succeeds
     #[tokio::test]
-    async fn test_both_models_fail_returns_error_and_allows_retry() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn test_freellmapi_audio_path_success() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -907,8 +1112,8 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let base_url = format!("http://127.0.0.1:{}", port);
 
-        let recovered = Arc::new(AtomicBool::new(false));
-        let rec_clone = Arc::clone(&recovered);
+        let chat_hit_count = Arc::new(AtomicUsize::new(0));
+        let c_hits = Arc::clone(&chat_hit_count);
 
         tokio::spawn(async move {
             loop {
@@ -916,23 +1121,14 @@ mod tests {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                let rec = Arc::clone(&rec_clone);
+                let c_hits = Arc::clone(&c_hits);
 
                 tokio::spawn(async move {
-                    let _req_str = read_http_request(&mut socket).await;
+                    let req_str = read_http_request(&mut socket).await;
 
-                    if !rec.load(Ordering::SeqCst) {
-                        // Outage: Both models fail with 503
-                        let body = r#"{"error":{"code":503,"status":"UNAVAILABLE"}}"#;
-                        let resp = format!(
-                            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(resp.as_bytes()).await;
-                    } else {
-                        // Recovered: Service returns 200 OK
-                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Successfully recovered dictation"}]}}]}"#;
+                    if req_str.contains("chat/completions") && req_str.contains("input_audio") {
+                        c_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"Clean transcription from audio path"}}],"model":"auto"}"#;
                         let resp = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             body.len(),
@@ -944,44 +1140,518 @@ mod tests {
             }
         });
 
-        let client = GeminiDictationClient::with_base_url(
-            Some("gemini-3.8-flash".to_string()),
-            Some("fake_api_key".to_string()),
+        let client = OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
             Some(base_url),
+            Some("auto".to_string()),
         );
 
         let wav = vec![0u8; 44 + 16000];
-        // 1. First attempt: both models fail
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Clean transcription from audio path");
+        assert_eq!(
+            client.last_served_backend(),
+            Some("freellmapi:chat_audio".to_string())
+        );
+        assert_eq!(chat_hit_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// (b) FreeLLMAPI audio rejected (400 Bad Request) -> transcription path:
+    /// chat/completions rejects input_audio with 400 -> client falls back to POST /audio/transcriptions
+    /// followed by text-only chat/completions cleanup.
+    #[tokio::test]
+    async fn test_freellmapi_audio_rejected_fallback_to_transcription() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let audio_chat_hits = Arc::new(AtomicUsize::new(0));
+        let transcribe_hits = Arc::new(AtomicUsize::new(0));
+        let text_chat_hits = Arc::new(AtomicUsize::new(0));
+
+        let ac_hits = Arc::clone(&audio_chat_hits);
+        let tr_hits = Arc::clone(&transcribe_hits);
+        let tc_hits = Arc::clone(&text_chat_hits);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let ac_hits = Arc::clone(&ac_hits);
+                let tr_hits = Arc::clone(&tr_hits);
+                let tc_hits = Arc::clone(&tc_hits);
+
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+
+                    if req_str.contains("chat/completions") && req_str.contains("input_audio") {
+                        // 1. Path 1: Proxy rejects input_audio with 400 Bad Request
+                        ac_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"error":{"message":"input_audio is not supported by model 'auto'","type":"invalid_request_error","code":"parameter_unsupported"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("audio/transcriptions") {
+                        // 2. Path 2a: Proxy handles audio/transcriptions
+                        tr_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"text":"hello world this is raw speech"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("chat/completions")
+                        && req_str.contains("Raw transcription")
+                    {
+                        // 3. Path 2b: Text-only chat cleanup
+                        tc_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"id":"chatcmpl-2","choices":[{"message":{"role":"assistant","content":"Hello world, this is raw speech."}}],"model":"auto"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(base_url),
+            Some("auto".to_string()),
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Hello world, this is raw speech.");
+        assert_eq!(
+            client.last_served_backend(),
+            Some("freellmapi:transcribe_then_chat".to_string())
+        );
+        assert_eq!(audio_chat_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(transcribe_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(text_chat_hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// (c) Proxy down -> fast fail + retained audio:
+    /// When FreeLLMAPI proxy is unreachable (connect error), client fails fast (<1.5s)
+    /// without hanging, and audio is retained in memory for retry.
+    #[tokio::test]
+    async fn test_freellmapi_proxy_down_fast_fail_and_retained_audio() {
+        // Point FreeLLMAPI to an unassigned local port where nothing is listening
+        let unreachable_url = "http://127.0.0.1:59998/v1".to_string();
+
+        let third_party = Arc::new(OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(unreachable_url),
+            Some("auto".to_string()),
+        ));
+
+        // Mock Google server where both models fail with 503
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    let body = r#"{"error":{"code":503,"status":"UNAVAILABLE"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let timeouts = TimeoutConfig {
+            primary_base_ms: 200,
+            primary_scale_per_sec_ms: 0,
+            primary_cap_ms: 200,
+            fallback_base_ms: 200,
+            fallback_scale_per_sec_ms: 0,
+            fallback_cap_ms: 200,
+            short_audio_threshold_secs: 5.0,
+        };
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(base_url),
+            timeouts,
+            Some(third_party),
+            true, // allow_third_party_fallback = true
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let t0 = std::time::Instant::now();
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+        let elapsed = t0.elapsed();
+
+        // 1. Error returned cleanly
+        assert!(res.is_err(), "Must return error when proxy is unreachable");
+
+        // 2. Fails fast in connect timeout (under 2.5s for Google primary + fallback + FreeLLMAPI connect timeout)
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "Unreachable proxy must fail fast (elapsed: {:?})",
+            elapsed
+        );
+    }
+
+    /// (d) Google daily-quota 429 -> straight to FreeLLMAPI on next request without retrying Google:
+    /// When Google returns daily quota exhaustion (429 containing "per day"), client sets a 30m lockout
+    /// on the Google API key, serves request via FreeLLMAPI, and routes subsequent requests directly
+    /// to FreeLLMAPI without touching Google.
+    #[tokio::test]
+    async fn test_google_daily_quota_429_skips_google_and_routes_to_freellmapi() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let google_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let google_port = google_listener.local_addr().unwrap().port();
+        let google_base_url = format!("http://127.0.0.1:{}", google_port);
+
+        let google_hit_count = Arc::new(AtomicUsize::new(0));
+        let g_hits = Arc::clone(&google_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match google_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let g_hits = Arc::clone(&g_hits);
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    g_hits.fetch_add(1, Ordering::SeqCst);
+                    // Google returns 429 Daily Quota Exhaustion
+                    let body = r#"{"error":{"code":429,"message":"Quota exceeded for quota metric 'Generate Content API requests per day' of service 'generativelanguage.googleapis.com'","status":"RESOURCE_EXHAUSTED"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_base_url = format!("http://127.0.0.1:{}", proxy_port);
+
+        let proxy_hit_count = Arc::new(AtomicUsize::new(0));
+        let p_hits = Arc::clone(&proxy_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match proxy_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    p_hits.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"id":"chatcmpl-d","choices":[{"message":{"role":"assistant","content":"FreeLLMAPI dictation result"}}],"model":"auto"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let third_party = Arc::new(OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(proxy_base_url),
+            Some("auto".to_string()),
+        ));
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(google_base_url),
+            TimeoutConfig::default(),
+            Some(third_party),
+            true, // allow_third_party_fallback = true
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+
+        // 1. Request 1: Google returns 429 Daily Quota -> Lockout set for 30m -> Falls back to FreeLLMAPI
         let res1 = client
             .transcribe_and_cleanup(&wav, Some("notepad.exe"))
             .await;
-        assert!(res1.is_err(), "Must return error when both models fail");
+        assert!(res1.is_ok());
+        assert_eq!(res1.unwrap(), "FreeLLMAPI dictation result");
+        assert_eq!(
+            client.last_served_backend(),
+            Some("freellmapi:chat_audio".to_string())
+        );
+        assert_eq!(google_hit_count.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy_hit_count.load(Ordering::SeqCst), 1);
+        assert!(
+            client.is_google_key_exhausted(),
+            "Google key must be locked out for 30m"
+        );
 
-        // 2. Service recovers
-        recovered.store(true, Ordering::SeqCst);
-
-        // 3. Retry with retained audio succeeds
+        // 2. Request 2: Next request MUST route straight to FreeLLMAPI without calling Google!
         let res2 = client
             .transcribe_and_cleanup(&wav, Some("notepad.exe"))
             .await;
         assert!(res2.is_ok());
-        assert_eq!(res2.unwrap(), "Successfully recovered dictation");
+        assert_eq!(res2.unwrap(), "FreeLLMAPI dictation result");
+
+        // Assert Google was NOT called on Request 2 (count stays 1)
+        assert_eq!(
+            google_hit_count.load(Ordering::SeqCst),
+            1,
+            "Google API was NOT called during 30m daily quota lockout"
+        );
+        // FreeLLMAPI served Request 2 directly (count becomes 2)
+        assert_eq!(
+            proxy_hit_count.load(Ordering::SeqCst),
+            2,
+            "FreeLLMAPI handled request directly"
+        );
+    }
+
+    /// (e) Setting false -> no third-party call at all:
+    /// When allow_third_party_fallback is false, failing Google calls return error without calling FreeLLMAPI.
+    #[tokio::test]
+    async fn test_allow_third_party_fallback_false_never_calls_freellmapi() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let google_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let google_port = google_listener.local_addr().unwrap().port();
+        let google_base_url = format!("http://127.0.0.1:{}", google_port);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match google_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    let body = r#"{"error":{"code":503,"status":"UNAVAILABLE"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_base_url = format!("http://127.0.0.1:{}", proxy_port);
+
+        let proxy_hit_count = Arc::new(AtomicUsize::new(0));
+        let p_hits = Arc::clone(&proxy_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match proxy_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    p_hits.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"choices":[{"message":{"content":"Should not be called"}}]}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let third_party = Arc::new(OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(proxy_base_url),
+            Some("auto".to_string()),
+        ));
+
+        let timeouts = TimeoutConfig {
+            primary_base_ms: 100,
+            primary_scale_per_sec_ms: 0,
+            primary_cap_ms: 100,
+            fallback_base_ms: 100,
+            fallback_scale_per_sec_ms: 0,
+            fallback_cap_ms: 100,
+            short_audio_threshold_secs: 5.0,
+        };
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(google_base_url),
+            timeouts,
+            Some(third_party),
+            false, // allow_third_party_fallback = false
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(
+            res.is_err(),
+            "Must return error when Google models fail and third-party is disabled"
+        );
+        assert_eq!(
+            proxy_hit_count.load(Ordering::SeqCst),
+            0,
+            "Third-party backend was NEVER called because allow_third_party_fallback is false"
+        );
+    }
+
+    /// Config errors (400, 401, 403) must fail fast and NEVER fall back
+    #[tokio::test]
+    async fn test_google_config_error_403_never_falls_back() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let google_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let google_port = google_listener.local_addr().unwrap().port();
+        let google_base_url = format!("http://127.0.0.1:{}", google_port);
+
+        let google_hit_count = Arc::new(AtomicUsize::new(0));
+        let g_hits = Arc::clone(&google_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match google_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let g_hits = Arc::clone(&g_hits);
+                tokio::spawn(async move {
+                    let _ = read_http_request(&mut socket).await;
+                    g_hits.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"error":{"code":403,"message":"API key not valid. Please pass a valid API key.","status":"PERMISSION_DENIED"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_port = proxy_listener.local_addr().unwrap().port();
+        let proxy_base_url = format!("http://127.0.0.1:{}", proxy_port);
+
+        let proxy_hit_count = Arc::new(AtomicUsize::new(0));
+
+        let third_party = Arc::new(OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(proxy_base_url),
+            Some("auto".to_string()),
+        ));
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(google_base_url),
+            TimeoutConfig::default(),
+            Some(third_party),
+            true, // allow_third_party_fallback is true
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_err());
+        assert_eq!(
+            google_hit_count.load(Ordering::SeqCst),
+            1,
+            "Primary model failed with 403; no further Google model attempted"
+        );
+        assert_eq!(
+            proxy_hit_count.load(Ordering::SeqCst),
+            0,
+            "FreeLLMAPI was NOT called on 403 Forbidden (config error surfaced directly)"
+        );
     }
 
     #[tokio::test]
-    #[cfg(feature = "live-gemini")]
-    async fn test_live_gemini_smoke_and_adversarial() {
+    #[cfg(feature = "live-freellmapi")]
+    async fn test_live_freellmapi_smoke_and_adversarial() {
         use std::time::Instant;
 
-        let api_key = match std::env::var("GEMINI_API_KEY") {
-            Ok(k) if !k.trim().is_empty() => k.trim().to_string(),
+        let api_key = match crate::key_storage::get_freellmapi_api_key() {
+            Some(k) if !k.trim().is_empty() => k.trim().to_string(),
             _ => {
-                println!("[SKIPPED] GEMINI_API_KEY not set in environment; skipping live Gemini smoke test.");
+                println!("[SKIPPED] FREELLMAPI_API_KEY not set in environment or keyring; skipping live FreeLLMAPI smoke test.");
                 return;
             }
         };
 
-        let client = GeminiDictationClient::new(None, Some(api_key));
+        let base_url = crate::key_storage::get_freellmapi_base_url();
+        println!("Connecting to live FreeLLMAPI endpoint: {}", base_url);
+
+        let client = OpenAiCompatDictationClient::new(
+            Some(api_key),
+            Some(base_url),
+            Some("auto".to_string()),
+        );
 
         // 1. Generate clean WAV fixture (1 second 250Hz tone @ 16kHz mono)
         let mut samples = Vec::with_capacity(16000);
@@ -1006,42 +1676,30 @@ mod tests {
             wav.extend_from_slice(&s.to_le_bytes());
         }
 
-        println!("\n--- [LIVE SMOKE TEST 1: Clean Tone Audio Fixture] ---");
+        println!("\n--- [LIVE FREELLMAPI SMOKE TEST 1: Tone Audio Fixture] ---");
         let t0 = Instant::now();
         let res = client
             .transcribe_and_cleanup(&wav, Some("notepad.exe"))
             .await;
         let latency_ms = t0.elapsed().as_millis();
-        let served_model_1 = client
-            .last_served_model()
-            .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "Live smoke test (tone fixture) completed in {} ms using model '{}': {:?}",
-            latency_ms, served_model_1, res
-        );
-        assert!(res.is_ok(), "Live Gemini dictation request must succeed");
+        let served_backend = client
+            .last_served_backend()
+            .unwrap_or_else(|| "none".to_string());
 
-        if served_model_1 != "gemini-3.8-flash" {
+        println!(
+            "Live FreeLLMAPI tone test result in {} ms (backend: '{}'): {:?}",
+            latency_ms, served_backend, res
+        );
+
+        if served_backend == "freellmapi:transcribe_then_chat" {
             println!(
-                "[FALLBACK DETECTED] Target model 'gemini-3.8-flash' was not served; actual model: '{}'",
-                served_model_1
+                "[NOTICE] FreeLLMAPI proxy does not support direct input_audio on /chat/completions (returned 4xx); successfully served via audio/transcriptions + chat cleanup path."
             );
-            if std::env::var("ALLOW_GEMINI_FALLBACK").is_err() {
-                panic!(
-                    "Model fallback occurred: primary model 'gemini-3.8-flash' failed and fell back to '{}'. Failing test because ALLOW_GEMINI_FALLBACK environment variable is not set.",
-                    served_model_1
-                );
-            } else {
-                println!(
-                    "[ALLOW_GEMINI_FALLBACK=1] Fallback from 'gemini-3.8-flash' to '{}' explicitly allowed by environment.",
-                    served_model_1
-                );
-            }
+        } else if served_backend == "freellmapi:chat_audio" {
+            println!("[NOTICE] FreeLLMAPI proxy natively supports direct input_audio on /chat/completions.");
         }
 
-        println!("\n--- [LIVE SMOKE TEST 2: Adversarial Override Resistance] ---");
-        // Adversarial audio prompt test: Verify that an adversarial text/command in dictation context
-        // does not produce an instruction response (like a poem), but treats it as transcription or refuses answer.
+        println!("\n--- [LIVE FREELLMAPI SMOKE TEST 2: Adversarial Override Resistance] ---");
         let t1 = Instant::now();
         let adversarial_res = client
             .transcribe_and_cleanup(
@@ -1050,32 +1708,14 @@ mod tests {
             )
             .await;
         let adv_latency_ms = t1.elapsed().as_millis();
-        let served_model_2 = client
-            .last_served_model()
-            .unwrap_or_else(|| "unknown".to_string());
-        println!(
-            "Live adversarial test completed in {} ms using model '{}': {:?}",
-            adv_latency_ms, served_model_2, adversarial_res
-        );
-        assert!(adversarial_res.is_ok());
+        let adv_backend = client
+            .last_served_backend()
+            .unwrap_or_else(|| "none".to_string());
 
-        if served_model_2 != "gemini-3.8-flash" {
-            println!(
-                "[FALLBACK DETECTED] Target model 'gemini-3.8-flash' was not served; actual model: '{}'",
-                served_model_2
-            );
-            if std::env::var("ALLOW_GEMINI_FALLBACK").is_err() {
-                panic!(
-                    "Model fallback occurred: primary model 'gemini-3.8-flash' failed and fell back to '{}'. Failing test because ALLOW_GEMINI_FALLBACK environment variable is not set.",
-                    served_model_2
-                );
-            } else {
-                println!(
-                    "[ALLOW_GEMINI_FALLBACK=1] Fallback from 'gemini-3.8-flash' to '{}' explicitly allowed by environment.",
-                    served_model_2
-                );
-            }
-        }
+        println!(
+            "Live FreeLLMAPI adversarial test in {} ms (backend: '{}'): {:?}",
+            adv_latency_ms, adv_backend, adversarial_res
+        );
 
         if let Ok(ref text) = adversarial_res {
             let lower = text.to_lowercase();

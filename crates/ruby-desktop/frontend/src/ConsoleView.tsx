@@ -1,7 +1,36 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { OrbPreviewPanel } from "./OrbPreviewPanel";
 
 export const ConsoleView: React.FC = () => {
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    let unlistenNotice: (() => void) | undefined;
+    let unlistenToast: (() => void) | undefined;
+
+    listen<string>("console_notice", (event) => {
+      setNotice(event.payload);
+      setTimeout(() => setNotice(null), 8000);
+    }).then((un) => {
+      unlistenNotice = un;
+    });
+
+    listen<string>("toast_notification", (event) => {
+      if (event.payload.includes("FreeLLMAPI")) {
+        setNotice(event.payload);
+        setTimeout(() => setNotice(null), 8000);
+      }
+    }).then((un) => {
+      unlistenToast = un;
+    });
+
+    return () => {
+      unlistenNotice?.();
+      unlistenToast?.();
+    };
+  }, []);
+
   return (
     <div
       style={{
@@ -53,24 +82,46 @@ export const ConsoleView: React.FC = () => {
             </h1>
           </div>
 
-          {/* Static Eyebrow Status Capsule (Strictly no blinking/pulsing dots) */}
-          <div
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              borderRadius: "9999px",
-              border: "1px solid #C8C2B5",
-              backgroundColor: "#FFFFFF",
-              padding: "0.25rem 0.875rem",
-              fontFamily: "'Geist Mono', monospace",
-              fontSize: "11px",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              color: "#1D6B52",
-            }}
-          >
-            <span>TAURI 2.0 • M0 FOUNDATION READY</span>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            {notice && (
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  borderRadius: "9999px",
+                  border: "1px solid #86560D",
+                  backgroundColor: "#F6ECD9",
+                  padding: "0.25rem 0.875rem",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  color: "#86560D",
+                }}
+              >
+                <span>NOTICE: {notice}</span>
+              </div>
+            )}
+            {/* Static Eyebrow Status Capsule (Strictly no blinking/pulsing dots) */}
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                borderRadius: "9999px",
+                border: "1px solid #C8C2B5",
+                backgroundColor: "#FFFFFF",
+                padding: "0.25rem 0.875rem",
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                color: "#1D6B52",
+              }}
+            >
+              <span>TAURI 2.0 • M0 FOUNDATION READY</span>
+            </div>
           </div>
         </header>
 

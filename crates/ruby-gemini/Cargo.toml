@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["multipart"] }
 thiserror.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
@@ -19,6 +19,7 @@ tracing.workspace = true
 [features]
 default = []
 live-gemini = []
+live-freellmapi = []
 
 [lints]
 workspace = true

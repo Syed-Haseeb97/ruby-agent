@@ -4,6 +4,7 @@
 
 pub mod dictation_client;
 pub mod key_storage;
+pub mod openai_client;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use thiserror::Error;
 
 pub use dictation_client::{DictationClient, GeminiDictationClient, MockDictationClient};
 pub use key_storage::{get_gemini_api_key, set_gemini_api_key};
+pub use openai_client::OpenAiCompatDictationClient;
 
 pub const MODEL_CHAT_FLASH: &str = "gemini-3.8-flash";
 pub const MODEL_LIVE_AUDIO: &str = "gemini-3.8-live";

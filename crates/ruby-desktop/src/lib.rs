@@ -157,7 +157,15 @@ pub fn run() {
                                 }
                                 HotKeyAction::HoldReleased { .. } => {
                                     let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
-                                    if let Err(ruby_dictation::DictationError::Insertion(ref s)) = dictation_engine.finish_and_insert(target_proc).await {
+                                    let res = dictation_engine.finish_and_insert(target_proc).await;
+                                    if res.is_ok() {
+                                        if let Some(backend) = dictation_engine.last_served_backend() {
+                                            if backend.starts_with("freellmapi") {
+                                                let _ = app_handle.emit("console_notice", "served via FreeLLMAPI");
+                                                let _ = app_handle.emit("toast_notification", "served via FreeLLMAPI");
+                                            }
+                                        }
+                                    } else if let Err(ruby_dictation::DictationError::Insertion(ref s)) = res {
                                         if s.contains("ElevatedTargetBlocked") {
                                             let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
                                         }
@@ -168,7 +176,15 @@ pub fn run() {
                                         let _ = dictation_engine.start_recording().await;
                                     } else {
                                         let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
-                                        if let Err(ruby_dictation::DictationError::Insertion(ref s)) = dictation_engine.finish_and_insert(target_proc).await {
+                                        let res = dictation_engine.finish_and_insert(target_proc).await;
+                                        if res.is_ok() {
+                                            if let Some(backend) = dictation_engine.last_served_backend() {
+                                                if backend.starts_with("freellmapi") {
+                                                    let _ = app_handle.emit("console_notice", "served via FreeLLMAPI");
+                                                    let _ = app_handle.emit("toast_notification", "served via FreeLLMAPI");
+                                                }
+                                            }
+                                        } else if let Err(ruby_dictation::DictationError::Insertion(ref s)) = res {
                                             if s.contains("ElevatedTargetBlocked") {
                                                 let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
                                             }

@@ -8,6 +8,7 @@ files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
 secret_patterns = [
     (r"AIza[0-9A-Za-z-_]{35}", "Google API Key"),
     (r"sk-[a-zA-Z0-9]{20,}", "OpenAI/Anthropic Secret Key"),
+    (r"freellmapi-[A-Za-z0-9_\-]{16,}", "FreeLLMAPI Secret Key"),
     (r"ghp_[a-zA-Z0-9]{20,}", "GitHub Personal Access Token"),
     (r"github_pat_[a-zA-Z0-9_]{20,}", "GitHub Fine-Grained PAT"),
     (r"BEGIN (?:RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY", "Private Key Header"),
