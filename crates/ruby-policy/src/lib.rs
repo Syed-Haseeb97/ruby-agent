@@ -26,6 +26,9 @@ pub trait SecurityPolicy: Send + Sync {
     fn validate_read_path(&self, path: &Path) -> Result<PathBuf, PolicyError>;
     fn validate_write_path(&self, path: &Path) -> Result<PathBuf, PolicyError>;
     fn validate_url(&self, url: &url::Url) -> Result<(), PolicyError>;
+    fn allowed_roots(&self) -> &[PathBuf] {
+        &[]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +238,10 @@ impl SecurityPolicy for DefaultSecurityPolicy {
         }
 
         Ok(())
+    }
+
+    fn allowed_roots(&self) -> &[PathBuf] {
+        &self.allowed_roots
     }
 }
 

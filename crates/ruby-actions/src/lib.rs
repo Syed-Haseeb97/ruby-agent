@@ -32,6 +32,15 @@ pub enum LocalAction {
     ScreenClick { x: u32, y: u32 },
     SetReminder { seconds: u64, message: String },
     SetWindowsStartup { enable: bool },
+    ListFolder(String),
+    ReadFileHead { path: String, max_bytes: usize },
+    FileInfo(String),
+    SendFile { path: String, max_bytes: usize },
+    GitStatus(String),
+    GitLog { repo: String, limit: usize },
+    GitDiffStat(String),
+    GhPrList { repo: Option<String>, limit: usize },
+    GhIssueList { repo: Option<String>, limit: usize },
 }
 
 #[async_trait]
@@ -168,6 +177,237 @@ impl ActionExecutor for AllowlistedActionExecutor {
             LocalAction::SetWindowsStartup { enable } => {
                 Ok(format!("Windows startup set to: {enable}"))
             }
+
+            LocalAction::ListFolder(dir) => {
+                let p = Path::new(&dir);
+                if !p.exists() || !p.is_dir() {
+                    return Err(ActionError::Failed(format!("Directory not found: {dir}")));
+                }
+                let mut entries = Vec::new();
+                let read_dir = std::fs::read_dir(p).map_err(|e| ActionError::Io(e.to_string()))?;
+                for entry in read_dir.flatten() {
+                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let file_type = entry.file_type().ok();
+                    let is_dir = file_type.as_ref().map(|t| t.is_dir()).unwrap_or(false);
+                    let size_str = if is_dir {
+                        "<DIR>".to_string()
+                    } else if let Ok(meta) = entry.metadata() {
+                        format!("{} B", meta.len())
+                    } else {
+                        "-".to_string()
+                    };
+                    entries.push(format!("{:<10} {}", size_str, file_name));
+                    if entries.len() >= 50 {
+                        entries.push("... (truncated at 50 items)".to_string());
+                        break;
+                    }
+                }
+                Ok(format!(
+                    "Directory listing for {dir}:\n{}",
+                    entries.join("\n")
+                ))
+            }
+
+            LocalAction::ReadFileHead { path, max_bytes } => {
+                let p = Path::new(&path);
+                if !p.exists() || !p.is_file() {
+                    return Err(ActionError::Failed(format!("File not found: {path}")));
+                }
+                use std::io::Read;
+                let mut file =
+                    std::fs::File::open(p).map_err(|e| ActionError::Io(e.to_string()))?;
+                let cap = std::cmp::min(max_bytes, 65536); // Cap at 64 KB
+                let mut buffer = vec![0u8; cap];
+                let bytes_read = file
+                    .read(&mut buffer)
+                    .map_err(|e| ActionError::Io(e.to_string()))?;
+                buffer.truncate(bytes_read);
+
+                // Refuse binary files (check if null bytes exist in first 1024 bytes)
+                let check_len = std::cmp::min(bytes_read, 1024);
+                if buffer[..check_len].contains(&0x00) {
+                    return Err(ActionError::Disallowed(
+                        "Refusing to preview binary file (null bytes detected)".into(),
+                    ));
+                }
+
+                let text = String::from_utf8_lossy(&buffer);
+                Ok(format!(
+                    "[File head: {path} ({} bytes read)]\n{}",
+                    bytes_read, text
+                ))
+            }
+
+            LocalAction::FileInfo(path) => {
+                let p = Path::new(&path);
+                if !p.exists() {
+                    return Err(ActionError::Failed(format!(
+                        "File or directory not found: {path}"
+                    )));
+                }
+                let meta = std::fs::metadata(p).map_err(|e| ActionError::Io(e.to_string()))?;
+                let kind = if meta.is_dir() {
+                    "Directory"
+                } else if meta.is_file() {
+                    "File"
+                } else {
+                    "Other"
+                };
+                let len = meta.len();
+                let readonly = meta.permissions().readonly();
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| format!("{}s since epoch", d.as_secs()))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                Ok(format!(
+                    "Path: {path}\nType: {kind}\nSize: {len} bytes\nReadonly: {readonly}\nModified: {modified}"
+                ))
+            }
+
+            LocalAction::SendFile { path, max_bytes } => {
+                let p = Path::new(&path);
+                if !p.exists() || !p.is_file() {
+                    return Err(ActionError::Failed(format!("File not found: {path}")));
+                }
+                let meta = std::fs::metadata(p).map_err(|e| ActionError::Io(e.to_string()))?;
+                let cap = std::cmp::min(max_bytes, 10 * 1024 * 1024); // 10 MB cap
+                if meta.len() > cap as u64 {
+                    return Err(ActionError::Disallowed(format!(
+                        "File size ({} bytes) exceeds 10 MB limit",
+                        meta.len()
+                    )));
+                }
+                Ok(format!("READY_FOR_UPLOAD:{path}"))
+            }
+
+            LocalAction::GitStatus(repo) => {
+                let p = Path::new(&repo);
+                if !p.exists() || !p.is_dir() {
+                    return Err(ActionError::Failed(format!(
+                        "Repository directory not found: {repo}"
+                    )));
+                }
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .arg("status")
+                    .output()
+                    .map_err(|e| {
+                        ActionError::Failed(format!("git status failed to launch: {e}"))
+                    })?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(stdout.to_string())
+                } else {
+                    Err(ActionError::Failed(format!("git status error: {stderr}")))
+                }
+            }
+
+            LocalAction::GitLog { repo, limit } => {
+                let p = Path::new(&repo);
+                if !p.exists() || !p.is_dir() {
+                    return Err(ActionError::Failed(format!(
+                        "Repository directory not found: {repo}"
+                    )));
+                }
+                let cap_limit = std::cmp::min(limit, 50);
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["log", "-n", &cap_limit.to_string(), "--oneline"])
+                    .output()
+                    .map_err(|e| ActionError::Failed(format!("git log failed to launch: {e}")))?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(stdout.to_string())
+                } else {
+                    Err(ActionError::Failed(format!("git log error: {stderr}")))
+                }
+            }
+
+            LocalAction::GitDiffStat(repo) => {
+                let p = Path::new(&repo);
+                if !p.exists() || !p.is_dir() {
+                    return Err(ActionError::Failed(format!(
+                        "Repository directory not found: {repo}"
+                    )));
+                }
+                let output = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&repo)
+                    .args(["diff", "--stat"])
+                    .output()
+                    .map_err(|e| ActionError::Failed(format!("git diff failed to launch: {e}")))?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(if stdout.trim().is_empty() {
+                        "Working tree clean (no diff --stat)".to_string()
+                    } else {
+                        stdout.to_string()
+                    })
+                } else {
+                    Err(ActionError::Failed(format!("git diff error: {stderr}")))
+                }
+            }
+
+            LocalAction::GhPrList { repo, limit } => {
+                let cap_limit = std::cmp::min(limit, 30);
+                let mut cmd = std::process::Command::new("gh");
+                cmd.args(["pr", "list", "--limit", &cap_limit.to_string()]);
+                if let Some(r) = repo {
+                    cmd.args(["--repo", &r]);
+                }
+                let output = cmd.output().map_err(|e| {
+                    ActionError::Failed(format!("gh pr list failed to launch: {e}"))
+                })?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(if stdout.trim().is_empty() {
+                        "No open pull requests found.".to_string()
+                    } else {
+                        stdout.to_string()
+                    })
+                } else {
+                    Err(ActionError::Failed(format!("gh pr list error: {stderr}")))
+                }
+            }
+
+            LocalAction::GhIssueList { repo, limit } => {
+                let cap_limit = std::cmp::min(limit, 30);
+                let mut cmd = std::process::Command::new("gh");
+                cmd.args(["issue", "list", "--limit", &cap_limit.to_string()]);
+                if let Some(r) = repo {
+                    cmd.args(["--repo", &r]);
+                }
+                let output = cmd.output().map_err(|e| {
+                    ActionError::Failed(format!("gh issue list failed to launch: {e}"))
+                })?;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if output.status.success() {
+                    Ok(if stdout.trim().is_empty() {
+                        "No open issues found.".to_string()
+                    } else {
+                        stdout.to_string()
+                    })
+                } else {
+                    Err(ActionError::Failed(format!(
+                        "gh issue list error: {stderr}"
+                    )))
+                }
+            }
         }
     }
 }
@@ -276,5 +516,105 @@ mod tests {
             .execute(LocalAction::ScreenClick { x: 99999, y: 100 })
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_folder_action() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("file1.txt"), "hello").unwrap();
+        fs::create_dir(temp.path().join("subdir")).unwrap();
+
+        let executor = AllowlistedActionExecutor;
+        let res = executor
+            .execute(LocalAction::ListFolder(
+                temp.path().to_string_lossy().to_string(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(res.contains("file1.txt"));
+        assert!(res.contains("<DIR>"));
+        assert!(res.contains("subdir"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_head_text_and_binary_refusal() {
+        let temp = tempdir().unwrap();
+        let txt_path = temp.path().join("test.txt");
+        fs::write(&txt_path, "hello world 123").unwrap();
+
+        let bin_path = temp.path().join("binary.bin");
+        fs::write(&bin_path, b"hello\x00world\x01\x02").unwrap();
+
+        let executor = AllowlistedActionExecutor;
+
+        // Text succeeds
+        let res = executor
+            .execute(LocalAction::ReadFileHead {
+                path: txt_path.to_string_lossy().to_string(),
+                max_bytes: 100,
+            })
+            .await
+            .unwrap();
+        assert!(res.contains("hello world 123"));
+
+        // Binary is refused
+        let bin_res = executor
+            .execute(LocalAction::ReadFileHead {
+                path: bin_path.to_string_lossy().to_string(),
+                max_bytes: 100,
+            })
+            .await;
+        assert!(bin_res.is_err());
+        assert_eq!(
+            bin_res,
+            Err(ActionError::Disallowed(
+                "Refusing to preview binary file (null bytes detected)".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_info_action() {
+        let temp = tempdir().unwrap();
+        let file_path = temp.path().join("info.txt");
+        fs::write(&file_path, "some content").unwrap();
+
+        let executor = AllowlistedActionExecutor;
+        let res = executor
+            .execute(LocalAction::FileInfo(
+                file_path.to_string_lossy().to_string(),
+            ))
+            .await
+            .unwrap();
+
+        assert!(res.contains("Type: File"));
+        assert!(res.contains("Size: 12 bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_send_file_size_limit() {
+        let temp = tempdir().unwrap();
+        let small_file = temp.path().join("small.txt");
+        fs::write(&small_file, "tiny").unwrap();
+
+        let executor = AllowlistedActionExecutor;
+        let ok_res = executor
+            .execute(LocalAction::SendFile {
+                path: small_file.to_string_lossy().to_string(),
+                max_bytes: 10 * 1024 * 1024,
+            })
+            .await
+            .unwrap();
+        assert!(ok_res.starts_with("READY_FOR_UPLOAD:"));
+
+        // Excess size limit
+        let big_res = executor
+            .execute(LocalAction::SendFile {
+                path: small_file.to_string_lossy().to_string(),
+                max_bytes: 2, // Less than 4 bytes
+            })
+            .await;
+        assert!(big_res.is_err());
     }
 }

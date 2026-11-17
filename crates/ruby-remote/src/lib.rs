@@ -3,6 +3,7 @@
 //! Phase R0: Telegram channel adapter, state machine, confirmation plumbing,
 //! power queries, and security audit log.
 
+pub mod antigravity;
 pub mod audit;
 pub mod confirmation;
 pub mod keep_awake;

@@ -151,28 +151,27 @@ impl TelegramAdapter {
         }
     }
 
-    /// Splits reply text if larger than 4000 characters, applies secret redaction, and sends.
+    /// Applies secret redaction and sends. If text exceeds 4000 chars, sends preview + document upload.
     async fn send_redacted_reply(&self, chat_id: i64, text: &str) -> Result<(), RemoteError> {
         let sanitized = redact_sensitive_content(text, None);
         if sanitized.len() <= TELEGRAM_MAX_MESSAGE_CHARS {
             self.client.send_message(chat_id, &sanitized).await?;
         } else {
-            // Split on line breaks or chunk at 4000 chars
-            let mut remaining = sanitized.as_str();
-            while !remaining.is_empty() {
-                let chunk_len = if remaining.len() > TELEGRAM_MAX_MESSAGE_CHARS {
-                    // Try to break at a newline
-                    match remaining[..TELEGRAM_MAX_MESSAGE_CHARS].rfind('\n') {
-                        Some(pos) if pos > 0 => pos + 1,
-                        _ => TELEGRAM_MAX_MESSAGE_CHARS,
-                    }
-                } else {
-                    remaining.len()
-                };
-                let (chunk, rest) = remaining.split_at(chunk_len);
-                self.client.send_message(chat_id, chunk).await?;
-                remaining = rest;
-            }
+            let preview = format!(
+                "{}\n\n[... output exceeds {} characters; full text attached below as output.txt]",
+                &sanitized[..std::cmp::min(sanitized.len(), 1000)],
+                TELEGRAM_MAX_MESSAGE_CHARS
+            );
+            let _ = self.client.send_message(chat_id, &preview).await;
+            let _ = self
+                .client
+                .send_document(
+                    chat_id,
+                    "output.txt",
+                    sanitized.as_bytes(),
+                    Some("Full command output"),
+                )
+                .await;
         }
         Ok(())
     }
@@ -344,18 +343,35 @@ impl TelegramAdapter {
 
         match cmd.as_str() {
             "/help" => {
-                let help_text = "Ruby Assistant Remote (Phase R0)\n\n\
+                let help_text = "Ruby Assistant Remote (Phase R1 Read-Only)\n\n\
                 Available Commands:\n\
                 • /status - Laptop power, battery, uptime & active task status\n\
                 • /tasks - View recent tasks and current states\n\
                 • /stop - Immediately cancel all active and queued tasks\n\
+                • /ag [id] - Inspect Antigravity agent conversations & artifact summaries\n\
                 • /yes <code> - Confirm pending escalated action\n\
                 • /no - Cancel pending escalated action\n\
                 • /help - Show this command list\n\
-                • Plain text - Queue a new task (tool execution enabled in R1)";
+                • Read-only tools (inside allowed roots):\n\
+                  - list <path> / ls <path>\n\
+                  - read <path> / cat <path> (capped at 64KB, binary refused)\n\
+                  - info <path> / stat <path>\n\
+                  - send <path> / fetch <path> (document upload capped at 10MB)\n\
+                  - git status / git log / git diff\n\
+                  - gh pr list / gh issue list";
                 self.audit_logger
                     .log_entry(sender_id, None, "help", "success");
                 self.send_redacted_reply(chat_id, help_text).await?;
+            }
+            "/ag" => {
+                let ag_reply = crate::antigravity::inspect_antigravity_brain(if args.is_empty() {
+                    None
+                } else {
+                    Some(args)
+                });
+                self.audit_logger
+                    .log_entry(sender_id, None, "ag", "success");
+                self.send_redacted_reply(chat_id, &ag_reply).await?;
             }
             "/status" => {
                 let power = get_system_power_status();
@@ -456,19 +472,50 @@ impl TelegramAdapter {
                         .update_task_state(&task.id, TaskState::Running, None, None);
                     match h.handle_command(incoming).await {
                         Ok(res) => {
-                            self.task_mgr.update_task_state(
-                                &task.id,
-                                TaskState::Done,
-                                Some(res.clone()),
-                                None,
-                            );
+                            if res.contains("requires confirmation") {
+                                self.task_mgr.update_task_state(
+                                    &task.id,
+                                    TaskState::NeedsInput,
+                                    Some(res.clone()),
+                                    None,
+                                );
+                            } else {
+                                self.task_mgr.update_task_state(
+                                    &task.id,
+                                    TaskState::Done,
+                                    Some(res.clone()),
+                                    None,
+                                );
+                            }
                             self.audit_logger.log_entry(
                                 sender_id,
                                 Some(&task.id),
                                 "plain_text",
                                 "task_completed",
                             );
-                            res
+                            if let Some(path_to_send) = res.strip_prefix("READY_FOR_UPLOAD:") {
+                                let p = std::path::Path::new(path_to_send);
+                                if let Ok(bytes) = std::fs::read(p) {
+                                    let filename = p
+                                        .file_name()
+                                        .and_then(|f| f.to_str())
+                                        .unwrap_or("document.bin");
+                                    let _ = self
+                                        .client
+                                        .send_document(
+                                            chat_id,
+                                            filename,
+                                            &bytes,
+                                            Some(&format!("Document: {filename}")),
+                                        )
+                                        .await;
+                                    format!("Sent document: {filename} ({} bytes)", bytes.len())
+                                } else {
+                                    "Failed to read document for upload".to_string()
+                                }
+                            } else {
+                                res
+                            }
                         }
                         Err(e) => {
                             let err_msg = format!("Task failed: {}", e);
