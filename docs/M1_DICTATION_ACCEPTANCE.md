@@ -2,8 +2,8 @@
 
 **Repository**: `Syed-Haseeb97/ruby-agent` (Private)  
 **Workspace**: `D:\projects\ruby-agent`  
-**Latest Workspace Test Status**: 44 tests passed across 11 crates (0 failed)  
-**Clippy Status**: Clean (`cargo clippy --workspace -- -D warnings`, 0 warnings, 0 errors)  
+**Verified CI Commit**: `4a79e6bb6cf508f48f29d81d1dcb74f5d846d0b9`  
+**CI Run ID**: `44044258211` (windows-latest, success)  
 
 ---
 
@@ -22,7 +22,7 @@ All 10 required features, fixes, and guardrails are code-complete and verified i
 | **7** | **API Key & Log Hygiene** | API key passed exclusively via HTTP header `x-goog-api-key`, never query `?key=`. `redact_sensitive_content` scrubs API keys, raw audio byte streams, and transcripts from error logs and bodies. Verified by unit test `test_key_hygiene_and_log_redaction`. `git log --all -p -G"AIza[0-9A-Za-z_-]{35}" --oneline` returns completely empty. | `VERIFIED` |
 | **8** | **Multi-Format Clipboard Backup & Restore** | Enumerates all clipboard formats via `EnumClipboardFormats`, filters out GDI object handles (`CF_BITMAP`, `CF_PALETTE`, etc.) to prevent `STATUS_HEAP_CORRUPTION`, snapshots `HGLOBAL` bytes, marks paste with `ExcludeClipboardContentFromMonitorProcessing` & `CanIncludeInClipboardHistory = 0`, pastes via `Ctrl+V`, and restores prior clipboard formats cleanly. Verified by unit tests `test_clipboard_history_exclusion_formats_registered` and `test_clipboard_multiformat_backup_and_restore` (text, DIB bitmap, and HDROP file list). | `UNVERIFIED` (Physical Win+V history list pending) |
 | **9** | **Live Gemini Smoke & Adversarial Test** | Primary model `gemini-3.8-flash` has never served a request (returns HTTP 503 UNAVAILABLE on every attempt); therefore, `thinking_level: "low"` on `gemini-3.8-flash` is UNVERIFIED. Item 9 is verified strictly for `gemini-3-flash-preview`. Configurable via `GEMINI_MODEL` environment variable. | `VERIFIED` (Strictly for `gemini-3-flash-preview`; `gemini-3.8-flash` is UNVERIFIED) |
-| **10** | **Clean CI & Lint Quality** | All checks clean across all crates: `cargo fmt --check` (0 diff), `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings, 0 errors), `cargo test --workspace` (44 tests passing). | `VERIFIED` |
+| **10** | **Clean CI & Lint Quality** | All checks clean across all crates: `cargo fmt --check` (0 diff), `cargo clippy --workspace --all-targets -- -D warnings` (0 warnings, 0 errors), `cargo test --workspace` (44 tests passing). Verified on GitHub Actions run `44044258211` on `windows-latest` for commit `4a79e6bb6cf508f48f29d81d1dcb74f5d846d0b9`. | `VERIFIED` (Commit SHA `4a79e6bb6cf508f48f29d81d1dcb74f5d846d0b9`) |
 
 ---
 
