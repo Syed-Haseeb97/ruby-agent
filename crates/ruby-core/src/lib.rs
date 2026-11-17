@@ -5,6 +5,9 @@
 //! Enforces: GUI requests in background mode return `GUI_ISOLATION_REQUIRED`.
 //! Task states are kept strictly separate from the Orb emotion enum.
 
+pub mod chat;
+pub mod tts;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

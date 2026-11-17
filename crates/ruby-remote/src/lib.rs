@@ -8,6 +8,7 @@ pub mod confirmation;
 pub mod keep_awake;
 pub mod key_storage;
 pub mod power;
+pub mod r1_router;
 pub mod state_machine;
 pub mod telegram;
 pub mod traits;
@@ -22,6 +23,7 @@ pub use key_storage::{
     RemoteOffsetState,
 };
 pub use power::{get_system_power_status, SystemPowerSummary};
+pub use r1_router::{PolicyDecision, PolicyGatedCommandHandler};
 pub use state_machine::TaskManager;
 pub use telegram::TelegramAdapter;
 pub use traits::{ChannelAdapter, NoopCommandHandler, RemoteCommandHandler};

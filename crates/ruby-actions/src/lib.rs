@@ -16,7 +16,7 @@ pub enum ActionError {
     Io(#[from] std::io::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocalAction {
     OpenFile(String),
     LaunchApp(String),

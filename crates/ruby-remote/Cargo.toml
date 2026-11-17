@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 ruby-core.workspace = true
 ruby-gemini.workspace = true
+ruby-policy.workspace = true
+ruby-actions.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["multipart", "json"] }

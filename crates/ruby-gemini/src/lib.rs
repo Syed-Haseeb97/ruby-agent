@@ -2,6 +2,7 @@
 //! Models: `gemini-3.8-flash` (generateContent, dictation, interactions), `gemini-3.8-live` (Live API).
 //! Supports `thinkingConfig: { thinkingLevel: "low" }`.
 
+pub mod chat_client;
 pub mod dictation_client;
 pub mod key_storage;
 pub mod openai_client;
@@ -10,6 +11,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use chat_client::{
+    ChatClient, ChatMessage as GeminiChatMessage, ChatRole as GeminiChatRole, ChatTurnResponse,
+    MockChatClient,
+};
 pub use dictation_client::{DictationClient, GeminiDictationClient, MockDictationClient};
 pub use key_storage::{get_gemini_api_key, set_gemini_api_key};
 pub use openai_client::OpenAiCompatDictationClient;
