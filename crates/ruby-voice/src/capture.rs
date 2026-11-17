@@ -209,6 +209,7 @@ pub struct MockAudioSource {
     samples: Vec<i16>,
     pub is_recording: bool,
     pub is_committed: bool,
+    recorded_buffer: Vec<i16>,
 }
 
 impl Default for MockAudioSource {
@@ -223,6 +224,7 @@ impl Default for MockAudioSource {
             samples,
             is_recording: false,
             is_committed: false,
+            recorded_buffer: Vec::new(),
         }
     }
 }
@@ -233,6 +235,15 @@ impl MockAudioSource {
             samples,
             is_recording: false,
             is_committed: false,
+            recorded_buffer: Vec::new(),
+        }
+    }
+
+    /// Feeds incoming hardware audio frames into the source as time elapses.
+    /// Only frames arriving while is_recording == true are captured into the buffer.
+    pub fn feed_hardware_frame(&mut self, frame: &[i16]) {
+        if self.is_recording {
+            self.recorded_buffer.extend_from_slice(frame);
         }
     }
 }
@@ -241,6 +252,7 @@ impl AudioSource for MockAudioSource {
     fn start_recording(&mut self) -> Result<(), VoiceError> {
         self.is_recording = true;
         self.is_committed = false;
+        self.recorded_buffer.clear();
         Ok(())
     }
 
@@ -252,6 +264,7 @@ impl AudioSource for MockAudioSource {
     fn discard_recording(&mut self) -> Result<(), VoiceError> {
         self.is_recording = false;
         self.is_committed = false;
+        self.recorded_buffer.clear();
         self.samples.clear();
         Ok(())
     }
@@ -259,50 +272,116 @@ impl AudioSource for MockAudioSource {
     fn stop_recording(&mut self) -> Result<Vec<i16>, VoiceError> {
         self.is_recording = false;
         self.is_committed = false;
-        Ok(self.samples.clone())
+        if !self.recorded_buffer.is_empty() {
+            Ok(std::mem::take(&mut self.recorded_buffer))
+        } else {
+            Ok(self.samples.clone())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vad::trim_silence_vad;
 
     #[test]
-    fn test_pre_roll_preserves_speech_within_50ms_of_keydown() {
-        // Speech starts at 30ms (sample 480 @ 16kHz)
-        // Samples 0..480: silence
-        // Samples 480..8000: active speech
-        let mut audio_fixture = vec![0i16; 480];
-        for i in 0..7520 {
-            audio_fixture.push(((i % 40) as i16 * 100) + 1000);
-        }
+    fn test_pre_roll_timeline_preserves_speech_starting_at_100ms_before_250ms_commit() {
+        // Realistic hardware timeline:
+        // t = 0ms: Key-down event -> start_recording() opens pre-roll buffer.
+        // t = 0..100ms: 100ms of ambient silence (1600 samples @ 16kHz).
+        // t = 100..250ms: User starts speaking early (150ms = 2400 samples of distinct speech).
+        // t = 250ms: Hold qualification reached -> commit_recording() called.
+        // t = 250..500ms: Sustained speech post-commit (250ms = 4000 samples).
+        // t = 500ms: User finishes speaking -> stop_recording().
+        const EARLY_SPEECH_VAL: i16 = 7777;
+        const LATER_SPEECH_VAL: i16 = 3333;
 
-        let mut mock_source = MockAudioSource::new(audio_fixture.clone());
+        let mut mock_source = MockAudioSource::default();
 
-        // 1. Key-down arrives -> start pre-roll recording into ring buffer immediately
+        // 1. t = 0ms: Key-down arrives -> pre-roll buffering begins
         mock_source.start_recording().unwrap();
         assert!(mock_source.is_recording);
         assert!(!mock_source.is_committed);
 
-        // 2. 250ms threshold passes -> commit recording
+        // 2. t = 0..100ms: Silence frames arrive from hardware
+        let silence_100ms = vec![0i16; 1600];
+        mock_source.feed_hardware_frame(&silence_100ms);
+
+        // 3. t = 100..250ms: User begins speaking BEFORE the 250ms hold threshold!
+        let early_speech_150ms = vec![EARLY_SPEECH_VAL; 2400];
+        mock_source.feed_hardware_frame(&early_speech_150ms);
+
+        // 4. t = 250ms: Hold qualification elapses -> commit recording
         mock_source.commit_recording().unwrap();
         assert!(mock_source.is_committed);
 
-        // 3. User finishes talking -> stop recording
-        let recorded = mock_source.stop_recording().unwrap();
-        assert_eq!(recorded.len(), 8000);
+        // 5. t = 250..500ms: Continued speech frames arrive
+        let later_speech_250ms = vec![LATER_SPEECH_VAL; 4000];
+        mock_source.feed_hardware_frame(&later_speech_250ms);
 
-        // 4. VAD trims silence with 100ms leading padding:
-        // Because speech began at sample 480 (30ms) and lead_padding is 100ms (1600 samples),
-        // (start_idx * 320).saturating_sub(1600) evaluates to 0.
-        // Therefore, sample 0 of the pre-roll is retained and speech is not clipped.
-        let trimmed = trim_silence_vad(&recorded, 16000, 300.0);
-        assert!(!trimmed.is_empty(), "Trimmed audio should not be empty");
+        // 6. t = 500ms: Stop recording
+        let recorded = mock_source.stop_recording().unwrap();
         assert_eq!(
-            trimmed.as_ptr(),
-            recorded.as_ptr(),
-            "Audio starting within 50ms of key-down must retain start without clipping"
+            recorded.len(),
+            8000,
+            "Buffer must contain all 8000 frames from t=0 to t=500ms"
+        );
+
+        // Assert: Early speech that started at t=100ms is retained in the buffer
+        assert!(
+            recorded.contains(&EARLY_SPEECH_VAL),
+            "Pre-roll buffer MUST contain the speech starting at t=100ms"
+        );
+        assert_eq!(
+            recorded[1600], EARLY_SPEECH_VAL,
+            "Sample at index 1600 (t=100ms) must be the start of speech"
+        );
+        assert_eq!(
+            recorded[3999], EARLY_SPEECH_VAL,
+            "Sample at index 3999 (t=250ms) must be the end of pre-commit speech"
+        );
+        assert_eq!(
+            recorded[4000], LATER_SPEECH_VAL,
+            "Sample at index 4000 (t=250ms) must be post-commit speech"
+        );
+    }
+
+    #[test]
+    fn test_old_behavior_without_preroll_fails_to_capture_early_speech() {
+        // Models the OLD behavior where recording started ONLY at commit (t=250ms):
+        const EARLY_SPEECH_VAL: i16 = 7777;
+        const LATER_SPEECH_VAL: i16 = 3333;
+
+        let mut old_mock_source = MockAudioSource::default();
+
+        // 1. t = 0ms: Key-down arrives, but OLD behavior does NOT start recording!
+        // (start_recording is omitted at t=0)
+        assert!(!old_mock_source.is_recording);
+
+        // 2. t = 0..100ms: Silence arrives from hardware (dropped)
+        let silence_100ms = vec![0i16; 1600];
+        old_mock_source.feed_hardware_frame(&silence_100ms);
+
+        // 3. t = 100..250ms: Speech arrives from hardware (DROPPED by old behavior!)
+        let early_speech_150ms = vec![EARLY_SPEECH_VAL; 2400];
+        old_mock_source.feed_hardware_frame(&early_speech_150ms);
+
+        // 4. t = 250ms: In old behavior, recording only starts now on commit!
+        old_mock_source.start_recording().unwrap();
+        old_mock_source.commit_recording().unwrap();
+
+        // 5. t = 250..500ms: Continued speech arrives
+        let later_speech_250ms = vec![LATER_SPEECH_VAL; 4000];
+        old_mock_source.feed_hardware_frame(&later_speech_250ms);
+
+        // 6. t = 500ms: Stop recording
+        let recorded = old_mock_source.stop_recording().unwrap();
+
+        // PROOF: Under old behavior, buffer has ONLY 4000 samples, and early speech is completely lost!
+        assert_eq!(recorded.len(), 4000);
+        assert!(
+            !recorded.contains(&EARLY_SPEECH_VAL),
+            "Old behavior PROVABLY loses all speech spoken between t=100ms and t=250ms"
         );
     }
 

@@ -15,6 +15,16 @@ use crate::GeminiError;
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 const API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
+/// Per-attempt timeout for the primary Gemini model (3.0 seconds).
+/// If the primary model does not respond within this window, it is considered unhealthy.
+pub const PRIMARY_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(3000);
+
+/// Per-attempt timeout for the fallback Gemini model (5.0 seconds).
+pub const FALLBACK_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(5000);
+
+/// Cooldown duration during which an unhealthy primary model is bypassed (60 seconds).
+pub const PRIMARY_UNHEALTHY_COOLDOWN: Duration = Duration::from_secs(60);
+
 const DICTATION_SYSTEM_PROMPT: &str = r#"You are a specialized audio dictation engine for the user's active desktop application.
 Your task is to transcribe spoken audio and clean it up in a SINGLE PASS.
 
@@ -45,7 +55,9 @@ pub struct GeminiDictationClient {
     client: Client,
     model: String,
     explicit_api_key: Option<String>,
+    base_url: String,
     last_served_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    primary_unhealthy_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Default for GeminiDictationClient {
@@ -56,21 +68,51 @@ impl Default for GeminiDictationClient {
 
 impl GeminiDictationClient {
     pub fn new(model: Option<String>, api_key: Option<String>) -> Self {
+        Self::with_base_url(model, api_key, None)
+    }
+
+    pub fn with_base_url(
+        model: Option<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
+        let configured_model = model
+            .or_else(|| std::env::var("GEMINI_MODEL").ok())
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
         Self {
             client,
-            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            model: configured_model,
             explicit_api_key: api_key,
+            base_url: base_url.unwrap_or_else(|| API_BASE_URL.to_string()),
             last_served_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            primary_unhealthy_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Returns the model name that successfully served the most recent request.
     pub fn last_served_model(&self) -> Option<String> {
         self.last_served_model.lock().ok().and_then(|m| m.clone())
+    }
+
+    /// Returns true if the primary model is currently cached as unhealthy.
+    pub fn is_primary_unhealthy(&self) -> bool {
+        self.primary_unhealthy_until
+            .lock()
+            .ok()
+            .and_then(|lock| *lock)
+            .map(|until| std::time::Instant::now() < until)
+            .unwrap_or(false)
+    }
+
+    /// Explicitly resets the primary model unhealthy cache.
+    pub fn reset_primary_unhealthy(&self) {
+        if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
+            *lock = None;
+        }
     }
 }
 
@@ -133,47 +175,98 @@ impl DictationClient for GeminiDictationClient {
             }
         });
 
-        let mut models_to_try = vec![self.model.clone()];
-        if self.model == "gemini-3.8-flash" {
-            models_to_try.push("gemini-3-flash-preview".to_string());
-        }
+        let is_primary_unhealthy = self.is_primary_unhealthy();
+        let fallback_model = "gemini-3-flash-preview".to_string();
+
+        let models_to_try: Vec<String> = if self.model == "gemini-3.8-flash" {
+            if is_primary_unhealthy {
+                tracing::info!(
+                    "Primary model 'gemini-3.8-flash' is cached as unhealthy (<60s cooldown); skipping directly to fallback '{}'",
+                    fallback_model
+                );
+                vec![fallback_model]
+            } else {
+                vec![self.model.clone(), fallback_model]
+            }
+        } else {
+            vec![self.model.clone()]
+        };
 
         let mut last_err = GeminiError::Api("No attempts made".to_string());
-        for (model_idx, current_model) in models_to_try.iter().enumerate() {
-            if model_idx > 0 {
+        for current_model in &models_to_try {
+            let is_primary = current_model == &self.model;
+            if !is_primary {
                 tracing::warn!(
                     "Gemini model fallback triggered: primary model '{}' failed; falling back to '{}'",
-                    models_to_try[0],
+                    self.model,
                     current_model
                 );
             }
 
-            let url = format!("{}/{}:generateContent", API_BASE_URL, current_model);
+            let url = format!("{}/{}:generateContent", self.base_url, current_model);
+            let per_attempt_timeout = if is_primary {
+                PRIMARY_PER_ATTEMPT_TIMEOUT
+            } else {
+                FALLBACK_PER_ATTEMPT_TIMEOUT
+            };
 
             debug!(
-                "Sending multimodal dictation request to Gemini ({}) via header authentication",
-                current_model
+                "Sending multimodal dictation request to Gemini ({}) via header authentication (timeout: {:?})",
+                current_model, per_attempt_timeout
             );
 
-            for attempt in 0..2 {
+            // Primary model gets at most 1 attempt before fallback!
+            // Fallback model gets up to 2 attempts for transient retry.
+            let max_attempts = if is_primary { 1 } else { 2 };
+
+            for attempt in 0..max_attempts {
                 if attempt > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
                 }
 
-                let response = match self
+                let send_future = self
                     .client
                     .post(&url)
                     .header("x-goog-api-key", &key)
                     .json(&request_body)
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
+                    .send();
+
+                let response = match tokio::time::timeout(per_attempt_timeout, send_future).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
                         last_err = GeminiError::Network(redact_sensitive_content(
                             &e.to_string(),
                             Some(&key),
                         ));
+                        if is_primary {
+                            if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
+                                *lock =
+                                    Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
+                            }
+                            tracing::warn!(
+                                "Primary model {} network error; caching unhealthy for 60s and falling back",
+                                current_model
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        last_err = GeminiError::Network(format!(
+                            "Request to model {} timed out after {:?}",
+                            current_model, per_attempt_timeout
+                        ));
+                        if is_primary {
+                            if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
+                                *lock =
+                                    Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
+                            }
+                            tracing::warn!(
+                                "Primary model {} timed out after {:?}; caching unhealthy for 60s and falling back",
+                                current_model, per_attempt_timeout
+                            );
+                            break;
+                        }
                         continue;
                     }
                 };
@@ -196,6 +289,10 @@ impl DictationClient for GeminiDictationClient {
                         .trim()
                         .to_string();
 
+                    if is_primary {
+                        self.reset_primary_unhealthy();
+                    }
+
                     if let Ok(mut lock) = self.last_served_model.lock() {
                         *lock = Some(current_model.clone());
                     }
@@ -211,7 +308,17 @@ impl DictationClient for GeminiDictationClient {
                 );
                 last_err = GeminiError::Api(format!("Status {}: {}", status, sanitized));
 
-                // Only retry transient 429 rate limit or 503 service unavailable spikes
+                if is_primary && (status.as_u16() == 429 || status.as_u16() == 503) {
+                    if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
+                        *lock = Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
+                    }
+                    tracing::warn!(
+                        "Primary model {} returned status {}; caching unhealthy for 60s and falling back immediately",
+                        current_model, status
+                    );
+                    break;
+                }
+
                 if status.as_u16() != 429 && status.as_u16() != 503 {
                     return Err(last_err);
                 }
@@ -334,6 +441,126 @@ mod tests {
         assert!(
             DICTATION_SYSTEM_PROMPT.contains("Output ONLY the clean transcribed text"),
             "System prompt must enforce transcription only"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_primary_503_fallback_caching_and_timeout_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let primary_hit_count = Arc::new(AtomicUsize::new(0));
+        let fallback_hit_count = Arc::new(AtomicUsize::new(0));
+
+        let p_hits = Arc::clone(&primary_hit_count);
+        let f_hits = Arc::clone(&fallback_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                let f_hits = Arc::clone(&f_hits);
+
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+
+                    if req_str.contains("gemini-3.8-flash") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"error":{"code":503,"status":"UNAVAILABLE","message":"High demand"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("gemini-3-flash-preview") {
+                        f_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Clean mock transcription"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = GeminiDictationClient::with_base_url(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(base_url),
+        );
+
+        // 1. First request: Primary fails immediately with 503 UNAVAILABLE.
+        // Client makes at most 1 attempt on primary, caches it as unhealthy for 60s, and falls back.
+        let t0 = std::time::Instant::now();
+        let res1 = client
+            .transcribe_and_cleanup(b"RIFF...", Some("notepad.exe"))
+            .await;
+        let elapsed1 = t0.elapsed();
+
+        assert!(res1.is_ok());
+        assert_eq!(res1.unwrap(), "Clean mock transcription");
+        assert_eq!(
+            client.last_served_model(),
+            Some("gemini-3-flash-preview".to_string())
+        );
+        assert_eq!(
+            primary_hit_count.load(Ordering::SeqCst),
+            1,
+            "Primary model was attempted exactly once before fallback"
+        );
+        assert_eq!(
+            fallback_hit_count.load(Ordering::SeqCst),
+            1,
+            "Fallback model was invoked and served the request"
+        );
+        assert!(
+            elapsed1 < PRIMARY_PER_ATTEMPT_TIMEOUT,
+            "Total elapsed time ({:?}) must be bounded by primary per-attempt timeout ({:?})",
+            elapsed1,
+            PRIMARY_PER_ATTEMPT_TIMEOUT
+        );
+        assert!(
+            client.is_primary_unhealthy(),
+            "Primary model must be marked unhealthy for cooldown window"
+        );
+
+        // 2. Second request within 60s cooldown: Primary MUST be completely bypassed!
+        let t1 = std::time::Instant::now();
+        let res2 = client
+            .transcribe_and_cleanup(b"RIFF...", Some("notepad.exe"))
+            .await;
+        let elapsed2 = t1.elapsed();
+
+        assert!(res2.is_ok());
+        assert_eq!(
+            primary_hit_count.load(Ordering::SeqCst),
+            1,
+            "Primary model was NOT called again during 60s unhealthy cooldown"
+        );
+        assert_eq!(
+            fallback_hit_count.load(Ordering::SeqCst),
+            2,
+            "Fallback model handled request directly"
+        );
+        assert!(
+            elapsed2 < Duration::from_millis(500),
+            "Cached request elapsed ({:?}) completed near-instantly",
+            elapsed2
         );
     }
 

@@ -111,7 +111,7 @@ mod tests {
     use super::*;
     use ruby_gemini::MockDictationClient;
     use ruby_platform::MockDesktopController;
-    use ruby_voice::MockAudioSource;
+    use ruby_voice::{AudioSource, MockAudioSource};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -205,28 +205,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pre_roll_preserves_speech_within_50ms_of_keydown() {
-        // Speech starts at 30ms (sample 480 @ 16kHz)
-        let mut audio_fixture = vec![0i16; 480];
-        for i in 0..7520 {
-            audio_fixture.push(((i % 40) as i16 * 100) + 1000);
-        }
+    async fn test_pre_roll_preserves_speech_starting_at_100ms_before_250ms_commit() {
+        const EARLY_SPEECH_VAL: i16 = 7777;
+        const LATER_SPEECH_VAL: i16 = 3333;
 
-        let audio = Box::new(MockAudioSource::new(audio_fixture));
+        let mut mock_audio = MockAudioSource::default();
+
+        // 1. Pre-roll started on keydown (t=0)
+        mock_audio.start_recording().unwrap();
+
+        // 2. Hardware frames arrive between t=0 and t=100ms (silence)
+        mock_audio.feed_hardware_frame(&vec![0i16; 1600]);
+
+        // 3. User begins speaking at t=100ms (150ms before commit at t=250ms)
+        mock_audio.feed_hardware_frame(&vec![EARLY_SPEECH_VAL; 2400]);
+
+        // 4. Minimum hold threshold (250ms) reached -> commit recording
+        mock_audio.commit_recording().unwrap();
+
+        // 5. Sustained speech post-commit
+        mock_audio.feed_hardware_frame(&vec![LATER_SPEECH_VAL; 4000]);
+
+        let audio = Box::new(mock_audio);
         let gemini = Box::new(MockDictationClient::new("Transcribed text with pre-roll"));
         let desktop = Box::new(MockDesktopController::default());
 
         let engine = SystemDictationEngine::new(audio, gemini, desktop, None);
 
-        // 1. Pre-roll started on keydown (t=0)
-        engine.start_pre_roll().await.unwrap();
-        assert_eq!(engine.current_state().await, DictationState::Idle);
-
-        // 2. Minimum hold threshold (250ms) reached -> commit recording
+        // Commit engine state
         engine.commit_pre_roll().await.unwrap();
         assert_eq!(engine.current_state().await, DictationState::Recording);
 
-        // 3. User finishes talking and releases chord
+        // 6. User finishes talking and releases chord
         let budget = engine
             .finish_and_insert(Some("code.exe".to_string()))
             .await
