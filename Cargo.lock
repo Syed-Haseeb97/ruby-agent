@@ -3352,6 +3352,7 @@ dependencies = [
  "ruby-memory",
  "ruby-platform",
  "ruby-policy",
+ "ruby-remote",
  "ruby-voice",
  "serde",
  "serde_json",
@@ -3388,6 +3389,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "keyring",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3443,6 +3445,27 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "ruby-remote"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "keyring",
+ "regex",
+ "reqwest 0.12.28",
+ "ruby-core",
+ "ruby-gemini",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows 0.58.0",
 ]
 
 [[package]]

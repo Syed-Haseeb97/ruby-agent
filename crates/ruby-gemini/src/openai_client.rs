@@ -173,6 +173,7 @@ impl DictationClient for OpenAiCompatDictationClient {
         match path1_result {
             Ok(Ok(response)) => {
                 let status = response.status();
+                let status_code = status.as_u16();
                 if status.is_success() {
                     let res_json: serde_json::Value = response
                         .json()
@@ -199,7 +200,7 @@ impl DictationClient for OpenAiCompatDictationClient {
 
                     info!("FreeLLMAPI Path 1 (chat_audio) succeeded");
                     return Ok(text);
-                } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                } else if status_code == 401 || status_code == 403 {
                     // Authentication or permission configuration error: surface immediately
                     let err_body = response.text().await.unwrap_or_default();
                     let sanitized = redact_sensitive_content(&err_body, Some(&key));
@@ -211,8 +212,17 @@ impl DictationClient for OpenAiCompatDictationClient {
                         "Status {}: {}",
                         status, sanitized
                     )));
-                } else if status.is_client_error() {
-                    // 4xx client error (e.g. 400 Bad Request, 422 Unprocessable):
+                } else if status_code == 429 {
+                    // 429 follows rate-limit path: surface immediately, do NOT fall back to Path 2
+                    let err_body = response.text().await.unwrap_or_default();
+                    let sanitized = redact_sensitive_content(&err_body, Some(&key));
+                    warn!("FreeLLMAPI rate limit (status 429): {}", sanitized);
+                    return Err(GeminiError::Api(format!(
+                        "Status 429 Rate Limit: {}",
+                        sanitized
+                    )));
+                } else if status_code == 400 || status_code == 415 || status_code == 422 {
+                    // Audio-unsupported responses: 400 Bad Request, 415 Unsupported Media Type, 422 Unprocessable Entity
                     // Proxy rejects input_audio -> fall back to Path 2 (audio/transcriptions + chat)
                     let err_body = response.text().await.unwrap_or_default();
                     warn!(
@@ -220,13 +230,10 @@ impl DictationClient for OpenAiCompatDictationClient {
                         status, redact_sensitive_content(&err_body, Some(&key))
                     );
                 } else {
-                    // 5xx server error or other failure
+                    // Other client error or 5xx server error: surface error directly without Path 2
                     let err_body = response.text().await.unwrap_or_default();
                     let sanitized = redact_sensitive_content(&err_body, Some(&key));
-                    error!(
-                        "FreeLLMAPI Path 1 server error (status {}): {}",
-                        status, sanitized
-                    );
+                    error!("FreeLLMAPI Path 1 error (status {}): {}", status, sanitized);
                     return Err(GeminiError::Api(format!(
                         "Status {}: {}",
                         status, sanitized

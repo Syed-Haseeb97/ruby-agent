@@ -21,6 +21,7 @@ use ruby_core::{OperationalState, OrbVisualState};
 use ruby_dictation::SystemDictationEngine;
 use ruby_gemini::GeminiDictationClient;
 use ruby_platform::{HotKeyAction, KeyboardHookHandle, WindowsDesktopController};
+use ruby_remote::{ChannelAdapter, NoopCommandHandler, TelegramAdapter};
 use ruby_voice::CpalAudioCapture;
 
 pub mod commands;
@@ -29,6 +30,7 @@ pub struct AppState {
     pub orb_state: Mutex<OrbVisualState>,
     pub seq_counter: AtomicU64,
     pub click_through: AtomicBool,
+    pub remote_adapter: Arc<TelegramAdapter>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -77,10 +79,14 @@ pub fn run() {
         println!("============================================================");
     }
 
+    let bot_token = ruby_remote::get_telegram_bot_token().unwrap_or_default();
+    let remote_adapter = Arc::new(TelegramAdapter::new(bot_token));
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Mutex::new(OrbVisualState::default()),
         seq_counter: AtomicU64::new(1),
         click_through: AtomicBool::new(false),
+        remote_adapter: Arc::clone(&remote_adapter),
     });
 
     #[cfg(feature = "test-capture")]
@@ -88,6 +94,8 @@ pub fn run() {
         commands::get_orb_state,
         commands::set_orb_state,
         commands::toggle_orb_click_through,
+        commands::get_remote_status,
+        commands::disconnect_remote,
         commands::save_orb_snapshot
     ]);
 
@@ -95,8 +103,29 @@ pub fn run() {
     let builder = builder.invoke_handler(tauri::generate_handler![
         commands::get_orb_state,
         commands::set_orb_state,
-        commands::toggle_orb_click_through
+        commands::toggle_orb_click_through,
+        commands::get_remote_status,
+        commands::disconnect_remote
     ]);
+
+    let remote_adapter_bg = Arc::clone(&remote_adapter);
+    let remote_cfg = ruby_remote::load_remote_config();
+    if remote_cfg.enabled && ruby_remote::get_telegram_bot_token().is_some() {
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            rt.block_on(async {
+                let _ = remote_adapter_bg
+                    .start_polling(Arc::new(NoopCommandHandler))
+                    .await;
+            });
+        });
+    }
 
     builder
         .setup(|app| {

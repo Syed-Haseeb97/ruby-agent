@@ -9,6 +9,7 @@ secret_patterns = [
     (r"AIza[0-9A-Za-z-_]{35}", "Google API Key"),
     (r"sk-[a-zA-Z0-9]{20,}", "OpenAI/Anthropic Secret Key"),
     (r"freellmapi-[A-Za-z0-9_\-]{16,}", "FreeLLMAPI Secret Key"),
+    (r"[0-9]{8,10}:[A-Za-z0-9_-]{35}", "Telegram Bot Token"),
     (r"ghp_[a-zA-Z0-9]{20,}", "GitHub Personal Access Token"),
     (r"github_pat_[a-zA-Z0-9_]{20,}", "GitHub Fine-Grained PAT"),
     (r"BEGIN (?:RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY", "Private Key Header"),

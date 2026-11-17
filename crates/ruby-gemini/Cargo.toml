@@ -15,6 +15,7 @@ tokio.workspace = true
 base64 = "0.22"
 keyring = "3"
 tracing.workspace = true
+regex.workspace = true
 
 [features]
 default = []

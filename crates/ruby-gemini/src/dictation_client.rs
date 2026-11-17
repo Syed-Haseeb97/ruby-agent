@@ -106,15 +106,40 @@ TRANSCRIPTION & CLEANUP RULES:
    - Output ONLY the clean transcribed text."#;
 
 /// Distinguishes Google per-minute rate limits (short cooldown) from daily quota exhaustion (long cooldown).
+/// Inspects Google's structured error details (`error.details[].violations[].description`), checking for quota
+/// metric violations specifying a daily limit (e.g. 'per day', 'PerDay', 'daily'), while specifically excluding
+/// per-minute limits.
 pub fn is_daily_quota_exhausted(status: reqwest::StatusCode, body: &str) -> bool {
     if status.as_u16() != 429 {
         return false;
     }
+    // 1. Inspect structured Google QuotaFailure details
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(details) = val["error"]["details"].as_array() {
+            for detail in details {
+                if let Some(violations) = detail["violations"].as_array() {
+                    for v in violations {
+                        if let Some(desc) = v["description"].as_str() {
+                            let lower = desc.to_ascii_lowercase();
+                            if (lower.contains("per day")
+                                || lower.contains("perday")
+                                || lower.contains("daily"))
+                                && !lower.contains("per minute")
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 2. Strict fallback for unstructured bodies: require explicit daily quota metric identifiers
     let lower = body.to_ascii_lowercase();
-    lower.contains("per day")
-        || lower.contains("daily")
-        || (lower.contains("quota exceeded") && lower.contains("day"))
-        || lower.contains("free_tier_requests_per_day")
+    (lower.contains("requests per day")
+        || lower.contains("requests_per_day")
+        || (lower.contains("quota metric") && lower.contains("per day")))
+        && !lower.contains("per minute")
 }
 
 #[async_trait]
@@ -682,6 +707,12 @@ pub fn redact_sensitive_content(input: &str, known_key: Option<&str>) -> String 
             .unwrap_or(out.len());
         out.replace_range(idx..end, "[REDACTED_API_KEY]");
     }
+    // Redact Telegram bot tokens (\d{8,10}:[A-Za-z0-9_-]{35})
+    static BOT_TOKEN_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b").unwrap());
+    out = BOT_TOKEN_RE
+        .replace_all(&out, "[REDACTED_API_KEY]")
+        .to_string();
     out
 }
 
@@ -694,9 +725,10 @@ mod tests {
     fn test_key_hygiene_and_log_redaction() {
         let fake_key = "AIzaSyFakeKey1234567890abcdef";
         let fake_freellm_key = format!("{}{}", "freellmapi-", "mockredactionkey12345");
+        let fake_bot_token = format!("{}:{}", "123456789", "A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q7R");
         let dirty_log = format!(
-            "Failed request with Google key={} and FreeLLM key={} timeout=10 error 403 Forbidden",
-            fake_key, fake_freellm_key
+            "Failed request with Google key={} FreeLLM key={} BotToken={} timeout=10 error 403 Forbidden",
+            fake_key, fake_freellm_key, fake_bot_token
         );
 
         let sanitized = redact_sensitive_content(&dirty_log, Some(fake_key));
@@ -707,6 +739,10 @@ mod tests {
         assert!(
             !sanitized.contains(&fake_freellm_key),
             "Sanitized string must not contain raw FreeLLMAPI key"
+        );
+        assert!(
+            !sanitized.contains(&fake_bot_token),
+            "Sanitized string must not contain raw Telegram bot token"
         );
         assert!(
             sanitized.contains("[REDACTED_API_KEY]"),
@@ -1254,6 +1290,139 @@ mod tests {
         assert_eq!(text_chat_hits.load(Ordering::SeqCst), 1);
     }
 
+    /// Fix b: FreeLLMAPI Path 2 triggers on 415 and 422
+    #[tokio::test]
+    async fn test_freellmapi_path2_triggers_on_415_and_422() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let transcribe_hits = Arc::new(AtomicUsize::new(0));
+        let tr_hits = Arc::clone(&transcribe_hits);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let tr_hits = Arc::clone(&tr_hits);
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+                    if req_str.contains("chat/completions") && req_str.contains("input_audio") {
+                        // Return 415 Unsupported Media Type
+                        let body = r#"{"error":{"message":"Unsupported media type for input_audio","code":415}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("audio/transcriptions") {
+                        tr_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"text":"415 fallback succeeded"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("chat/completions")
+                        && req_str.contains("Raw transcription")
+                    {
+                        let body = r#"{"choices":[{"message":{"content":"Clean 415 fallback"}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(base_url),
+            Some("auto".to_string()),
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Clean 415 fallback");
+        assert_eq!(transcribe_hits.load(Ordering::SeqCst), 1);
+    }
+
+    /// Fix b: FreeLLMAPI 429 follows rate-limit path and does NOT trigger Path 2
+    #[tokio::test]
+    async fn test_freellmapi_429_does_not_trigger_path2() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let transcribe_hits = Arc::new(AtomicUsize::new(0));
+        let tr_hits = Arc::clone(&transcribe_hits);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let tr_hits = Arc::clone(&tr_hits);
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+                    if req_str.contains("chat/completions") && req_str.contains("input_audio") {
+                        // Return 429 Too Many Requests
+                        let body = r#"{"error":{"message":"Rate limit exceeded","code":429}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("audio/transcriptions") {
+                        tr_hits.fetch_add(1, Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        let client = OpenAiCompatDictationClient::new(
+            Some("mock-freellm-key".to_string()),
+            Some(base_url),
+            Some("auto".to_string()),
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        // Must return error directly without falling back to Path 2!
+        assert!(res.is_err());
+        assert_eq!(
+            transcribe_hits.load(Ordering::SeqCst),
+            0,
+            "429 must NOT fall back to audio/transcriptions"
+        );
+    }
+
     /// (c) Proxy down -> fast fail + retained audio:
     /// When FreeLLMAPI proxy is unreachable (connect error), client fails fast (<1.5s)
     /// without hanging, and audio is retained in memory for retry.
@@ -1628,6 +1797,92 @@ mod tests {
             proxy_hit_count.load(Ordering::SeqCst),
             0,
             "FreeLLMAPI was NOT called on 403 Forbidden (config error surfaced directly)"
+        );
+    }
+
+    /// Fix a: Per-minute rate limit 429 must NOT trigger the 30-minute daily quota lockout.
+    #[tokio::test]
+    async fn test_google_per_minute_429_does_not_trigger_daily_lockout() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let google_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let google_port = google_listener.local_addr().unwrap().port();
+        let google_base_url = format!("http://127.0.0.1:{}", google_port);
+
+        let primary_hit_count = Arc::new(AtomicUsize::new(0));
+        let fallback_hit_count = Arc::new(AtomicUsize::new(0));
+
+        let p_hits = Arc::clone(&primary_hit_count);
+        let f_hits = Arc::clone(&fallback_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match google_listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                let f_hits = Arc::clone(&f_hits);
+
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+
+                    if req_str.contains("gemini-3.8-flash") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        // Structured per-minute quota error
+                        let body = r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"description":"Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'Generate Content API requests per minute' of service 'generativelanguage.googleapis.com'"}]}]}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("gemini-3-flash-preview") {
+                        f_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Served by fallback model"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = GeminiDictationClient::with_full_options(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(google_base_url),
+            TimeoutConfig::default(),
+            None,
+            false,
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        let res = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Served by fallback model");
+        assert_eq!(primary_hit_count.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_hit_count.load(Ordering::SeqCst), 1);
+
+        // Crucial assertions:
+        // 1. Primary is marked unhealthy for transient 60s cooldown
+        assert!(
+            client.is_primary_unhealthy(),
+            "Primary must be marked unhealthy for 60s"
+        );
+        // 2. Google key is NOT marked exhausted for 30m!
+        assert!(
+            !client.is_google_key_exhausted(),
+            "Per-minute 429 must NOT trigger 30-minute key lockout"
         );
     }
 

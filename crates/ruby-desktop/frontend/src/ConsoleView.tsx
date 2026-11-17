@@ -1,9 +1,47 @@
 import React, { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { OrbPreviewPanel } from "./OrbPreviewPanel";
+
+interface RemoteStatus {
+  enabled: boolean;
+  paired: boolean;
+  paired_user_id: number | null;
+  connected: boolean;
+  active_pairing_code: string | null;
+  pairing_code_expires_in_secs: number | null;
+  last_command_time_secs: number | null;
+}
 
 export const ConsoleView: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
+  const [remoteStatus, setRemoteStatus] = useState<RemoteStatus | null>(null);
+
+  const fetchRemoteStatus = async () => {
+    try {
+      const status = await invoke<RemoteStatus>("get_remote_status");
+      setRemoteStatus(status);
+    } catch {
+      // Ignore if Tauri IPC unavailable
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      const updated = await invoke<RemoteStatus>("disconnect_remote");
+      setRemoteStatus(updated);
+      setNotice("Remote disconnected and unassigned successfully.");
+      setTimeout(() => setNotice(null), 5000);
+    } catch (err) {
+      setNotice(`Failed to disconnect: ${String(err)}`);
+    }
+  };
+
+  useEffect(() => {
+    fetchRemoteStatus();
+    const interval = setInterval(fetchRemoteStatus, 4000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     let unlistenNotice: (() => void) | undefined;
@@ -211,6 +249,161 @@ export const ConsoleView: React.FC = () => {
             </p>
           </div>
         </div>
+
+        {/* Phase R0 Remote Control Status */}
+        <section
+          style={{
+            backgroundColor: "#FFFFFF",
+            border: "1px solid #C8C2B5",
+            borderRadius: "1rem",
+            padding: "1.5rem",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
+            <div>
+              <div
+                style={{
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "#5F626A",
+                  marginBottom: "0.25rem",
+                }}
+              >
+                Channel Adapter • Phase R0
+              </div>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.5rem",
+                  fontWeight: 400,
+                  margin: 0,
+                  color: "#16181D",
+                }}
+              >
+                Telegram Remote Control
+              </h2>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              {remoteStatus?.paired ? (
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    borderRadius: "9999px",
+                    border: "1px solid #1D6B52",
+                    backgroundColor: "#E3EFE8",
+                    padding: "0.2rem 0.75rem",
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "11px",
+                    textTransform: "uppercase",
+                    color: "#1D6B52",
+                  }}
+                >
+                  <span>PAIRED • USER {remoteStatus.paired_user_id}</span>
+                </div>
+              ) : (
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    borderRadius: "9999px",
+                    border: "1px solid #86560D",
+                    backgroundColor: "#F6ECD9",
+                    padding: "0.2rem 0.75rem",
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "11px",
+                    textTransform: "uppercase",
+                    color: "#86560D",
+                  }}
+                >
+                  <span>UNPAIRED</span>
+                </div>
+              )}
+
+              {remoteStatus?.paired && (
+                <button
+                  onClick={handleDisconnect}
+                  style={{
+                    border: "1px solid #C8C2B5",
+                    backgroundColor: "#FFFFFF",
+                    color: "#B53A26",
+                    borderRadius: "9999px",
+                    padding: "0.25rem 0.75rem",
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "11px",
+                    textTransform: "uppercase",
+                    cursor: "pointer",
+                    fontWeight: 500,
+                  }}
+                >
+                  Disconnect remote
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", marginTop: "1rem" }}>
+            <div>
+              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
+                Connection State
+              </div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
+                {remoteStatus?.connected ? "Active Polling (Long Poll)" : "Idle / Disconnected"}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
+                Last Command Time
+              </div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
+                {remoteStatus?.last_command_time_secs
+                  ? `${Math.floor((Date.now() / 1000 - remoteStatus.last_command_time_secs) / 60)}m ago`
+                  : "None recorded"}
+              </div>
+            </div>
+
+            <div>
+              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
+                Active Pairing Code
+              </div>
+              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
+                {remoteStatus?.active_pairing_code ? (
+                  <span style={{ color: "#1D6B52", letterSpacing: "0.1em" }}>
+                    {remoteStatus.active_pairing_code} ({remoteStatus.pairing_code_expires_in_secs}s remaining)
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </div>
+            </div>
+          </div>
+
+          {!remoteStatus?.paired && remoteStatus?.active_pairing_code && (
+            <div
+              style={{
+                marginTop: "1rem",
+                padding: "0.75rem",
+                backgroundColor: "#F5F3EE",
+                border: "1px solid #C8C2B5",
+                borderRadius: "0.5rem",
+                fontSize: "0.8125rem",
+                color: "#5F626A",
+              }}
+            >
+              <strong style={{ color: "#16181D" }}>Pairing Instructions:</strong> Open your Telegram app, message your bot, and send{" "}
+              <code style={{ color: "#16181D", backgroundColor: "#FFFFFF", padding: "0.1rem 0.3rem", borderRadius: "3px" }}>
+                /pair {remoteStatus.active_pairing_code}
+              </code>
+              . The code is single-use and expires in 5 minutes.
+            </div>
+          )}
+        </section>
 
         {/* Orb Verification & Acceptance Section */}
         <section>

@@ -75,6 +75,17 @@ pub fn toggle_orb_click_through(
     Ok(enable)
 }
 
+#[tauri::command]
+pub fn get_remote_status(state: State<'_, AppState>) -> ruby_remote::RemoteStatus {
+    state.remote_adapter.get_status()
+}
+
+#[tauri::command]
+pub fn disconnect_remote(state: State<'_, AppState>) -> Result<ruby_remote::RemoteStatus, String> {
+    state.remote_adapter.disconnect_remote()?;
+    Ok(state.remote_adapter.get_status())
+}
+
 #[cfg(feature = "test-capture")]
 #[tauri::command]
 pub fn save_orb_snapshot(name: String, base64_png: String) -> Result<String, String> {
