@@ -3301,6 +3301,7 @@ dependencies = [
  "ruby-policy",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
 ]
@@ -3322,6 +3323,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "regex",
  "ruby-actions",
  "ruby-config",
  "ruby-gemini",
@@ -3442,6 +3444,7 @@ dependencies = [
  "ruby-config",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "url",

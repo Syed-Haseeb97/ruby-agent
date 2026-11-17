@@ -21,7 +21,7 @@ use ruby_core::{OperationalState, OrbVisualState};
 use ruby_dictation::SystemDictationEngine;
 use ruby_gemini::GeminiDictationClient;
 use ruby_platform::{HotKeyAction, KeyboardHookHandle, WindowsDesktopController};
-use ruby_remote::{ChannelAdapter, NoopCommandHandler, TelegramAdapter};
+use ruby_remote::{ChannelAdapter, TelegramAdapter};
 use ruby_voice::CpalAudioCapture;
 
 pub mod commands;
@@ -120,9 +120,15 @@ pub fn run() {
                 Err(_) => return,
             };
             rt.block_on(async {
-                let _ = remote_adapter_bg
-                    .start_polling(Arc::new(NoopCommandHandler))
-                    .await;
+                let policy = Arc::new(ruby_policy::DefaultSecurityPolicy::new(vec![]));
+                let executor = Arc::new(ruby_actions::AllowlistedActionExecutor);
+                let confirmation_mgr = remote_adapter_bg.confirmation_manager();
+                let handler = Arc::new(ruby_remote::PolicyGatedCommandHandler::new(
+                    policy,
+                    executor,
+                    confirmation_mgr,
+                ));
+                let _ = remote_adapter_bg.start_polling(handler).await;
             });
         });
     }

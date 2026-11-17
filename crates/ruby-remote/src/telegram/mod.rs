@@ -40,6 +40,7 @@ pub struct TelegramAdapter {
     rate_limiter: SenderRateLimiter,
     running: Arc<AtomicBool>,
     last_command_time: Arc<Mutex<Option<u64>>>,
+    handler: Arc<Mutex<Option<Arc<dyn RemoteCommandHandler>>>>,
 }
 
 impl TelegramAdapter {
@@ -72,6 +73,7 @@ impl TelegramAdapter {
             rate_limiter,
             running,
             last_command_time,
+            handler: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -93,7 +95,12 @@ impl TelegramAdapter {
             rate_limiter: SenderRateLimiter::default(),
             running: Arc::new(AtomicBool::new(false)),
             last_command_time: Arc::new(Mutex::new(None)),
+            handler: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_command_handler(&self, handler: Arc<dyn RemoteCommandHandler>) {
+        *self.handler.lock().unwrap() = Some(handler);
     }
 
     pub fn task_manager(&self) -> TaskManager {
@@ -433,22 +440,68 @@ impl TelegramAdapter {
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             "plain_text" => {
-                // R0 Plain text = new task stub
                 let task = self.task_mgr.create_task(sender_id, args);
-                // Immediately transition to Done with R0 stub response
-                self.task_mgr.update_task_state(
-                    &task.id,
-                    TaskState::Done,
-                    Some("received, tool execution isn't enabled yet".to_string()),
-                    None,
-                );
-                self.audit_logger.log_entry(
+                let incoming = crate::types::IncomingMessage {
+                    update_id,
+                    message_id: message["message_id"].as_i64().unwrap_or(0),
                     sender_id,
-                    Some(&task.id),
-                    "plain_text",
-                    "task_created_done",
-                );
-                let reply = format!("[{}] received, tool execution isn't enabled yet", task.id);
+                    chat_id,
+                    text: args.to_string(),
+                    timestamp_secs: message_date,
+                    is_private: true,
+                };
+                let handler_opt = self.handler.lock().unwrap().clone();
+                let reply = if let Some(h) = handler_opt {
+                    self.task_mgr
+                        .update_task_state(&task.id, TaskState::Running, None, None);
+                    match h.handle_command(incoming).await {
+                        Ok(res) => {
+                            self.task_mgr.update_task_state(
+                                &task.id,
+                                TaskState::Done,
+                                Some(res.clone()),
+                                None,
+                            );
+                            self.audit_logger.log_entry(
+                                sender_id,
+                                Some(&task.id),
+                                "plain_text",
+                                "task_completed",
+                            );
+                            res
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Task failed: {}", e);
+                            self.task_mgr.update_task_state(
+                                &task.id,
+                                TaskState::Failed,
+                                None,
+                                Some(err_msg.clone()),
+                            );
+                            self.audit_logger.log_entry(
+                                sender_id,
+                                Some(&task.id),
+                                "plain_text",
+                                "task_failed",
+                            );
+                            err_msg
+                        }
+                    }
+                } else {
+                    self.task_mgr.update_task_state(
+                        &task.id,
+                        TaskState::Done,
+                        Some("received, tool execution isn't enabled yet".to_string()),
+                        None,
+                    );
+                    self.audit_logger.log_entry(
+                        sender_id,
+                        Some(&task.id),
+                        "plain_text",
+                        "task_created_done",
+                    );
+                    format!("[{}] received, tool execution isn't enabled yet", task.id)
+                };
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             other => {
@@ -472,9 +525,10 @@ impl ChannelAdapter for TelegramAdapter {
 
     async fn start_polling(
         &self,
-        _handler: Arc<dyn RemoteCommandHandler>,
+        handler: Arc<dyn RemoteCommandHandler>,
     ) -> Result<(), RemoteError> {
         self.running.store(true, Ordering::SeqCst);
+        *self.handler.lock().unwrap() = Some(Arc::clone(&handler));
         let client = Arc::clone(&self.client);
         let running = Arc::clone(&self.running);
 

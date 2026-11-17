@@ -15,5 +15,8 @@ async-trait.workspace = true
 url.workspace = true
 ipnet = "2.11"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
