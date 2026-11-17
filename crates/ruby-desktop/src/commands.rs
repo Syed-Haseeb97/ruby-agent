@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State, Window};
 use windows::Win32::{
     Foundation::HWND,
@@ -84,6 +85,137 @@ pub fn get_remote_status(state: State<'_, AppState>) -> ruby_remote::RemoteStatu
 pub fn disconnect_remote(state: State<'_, AppState>) -> Result<ruby_remote::RemoteStatus, String> {
     state.remote_adapter.disconnect_remote()?;
     Ok(state.remote_adapter.get_status())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct ChatTurnResult {
+    pub response_text: String,
+    pub emotion: Emotion,
+    pub served_backend: String,
+    pub tts_engine: String,
+}
+
+#[tauri::command]
+pub async fn send_chat_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    message: String,
+    _tts_engine: Option<String>,
+) -> Result<ChatTurnResult, String> {
+    // 1. Set Orb state to Thinking with spin active
+    {
+        let mut orb = state.orb_state.lock().unwrap();
+        orb.operational = OperationalState::Thinking;
+        orb.thinking_spin_active = true;
+        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+    }
+
+    // 2. Multi-turn LLM chat call
+    let history: Vec<ruby_gemini::ChatMessage> = {
+        let mut session = state.chat_session.lock().await;
+        session.add_message(ruby_core::chat::ChatMessage::user(&message));
+        session
+            .messages
+            .iter()
+            .map(|m| {
+                let role = match m.role {
+                    ruby_core::chat::ChatRole::User => ruby_gemini::ChatRole::User,
+                    ruby_core::chat::ChatRole::Assistant => ruby_gemini::ChatRole::Model,
+                    ruby_core::chat::ChatRole::System => ruby_gemini::ChatRole::System,
+                };
+                ruby_gemini::ChatMessage {
+                    role,
+                    content: m.content.clone(),
+                }
+            })
+            .collect()
+    };
+
+    let chat_resp = match state.chat_client.send_message(&history, &message).await {
+        Ok(r) => r,
+        Err(e) => {
+            let mut orb = state.orb_state.lock().unwrap();
+            orb.operational = OperationalState::Error;
+            orb.thinking_spin_active = false;
+            let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+            return Err(format!("Chat failed: {}", e));
+        }
+    };
+
+    // 3. Parse emotion response
+    let (answer_text, emotion) = ruby_core::chat::parse_emotion_response(&chat_resp.text, &message);
+    {
+        let mut session = state.chat_session.lock().await;
+        session.add_message(ruby_core::chat::ChatMessage::assistant(
+            &answer_text,
+            Some(emotion),
+        ));
+    }
+
+    // 4. Update Orb to Speaking with detected emotion
+    {
+        let mut orb = state.orb_state.lock().unwrap();
+        orb.operational = OperationalState::Speaking;
+        orb.emotion = emotion;
+        orb.thinking_spin_active = false;
+        orb.speaking_active = true;
+        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+    }
+
+    // 5. Synthesize TTS via Fallback Chain
+    let cancel = state.tts_playback.cancel_token();
+    let (wav_bytes, tts_engine_used) = state
+        .tts_chain
+        .synthesize(&answer_text, None, &cancel)
+        .await
+        .unwrap_or_else(|_| (vec![], "none"));
+
+    // 6. Non-blocking audio playback with cancellation support
+    let playback = Arc::clone(&state.tts_playback);
+    let app_clone = app.clone();
+    let state_orb = Arc::clone(&state.orb_state);
+    let seq_counter = Arc::clone(&state.seq_counter);
+
+    tokio::spawn(async move {
+        playback
+            .play(
+                &wav_bytes,
+                || {},
+                move || {
+                    let mut orb = state_orb.lock().unwrap();
+                    orb.operational = OperationalState::Idle;
+                    orb.emotion = Emotion::Neutral;
+                    orb.speaking_active = false;
+                    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let _ = app_clone
+                        .emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+                },
+            )
+            .await;
+    });
+
+    Ok(ChatTurnResult {
+        response_text: answer_text,
+        emotion,
+        served_backend: chat_resp.served_backend,
+        tts_engine: tts_engine_used.to_string(),
+    })
+}
+
+#[tauri::command]
+pub fn cancel_speech(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.tts_playback.cancel();
+    let mut orb = state.orb_state.lock().unwrap();
+    orb.operational = OperationalState::Idle;
+    orb.emotion = Emotion::Neutral;
+    orb.speaking_active = false;
+    orb.thinking_spin_active = false;
+    let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+    Ok(())
 }
 
 #[cfg(feature = "test-capture")]

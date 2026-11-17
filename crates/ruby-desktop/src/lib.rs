@@ -17,9 +17,13 @@ use windows::Win32::{
     },
 };
 
+use ruby_core::chat::ChatSession;
+use ruby_core::tts::{
+    EdgeTtsEngine, GeminiTtsEngine, TtsFallbackChain, TtsPlaybackController, WindowsSpeechEngine,
+};
 use ruby_core::{OperationalState, OrbVisualState};
 use ruby_dictation::SystemDictationEngine;
-use ruby_gemini::GeminiDictationClient;
+use ruby_gemini::{ChatClient, GeminiChatClient, GeminiDictationClient};
 use ruby_platform::{HotKeyAction, KeyboardHookHandle, WindowsDesktopController};
 use ruby_remote::{ChannelAdapter, TelegramAdapter};
 use ruby_voice::CpalAudioCapture;
@@ -27,10 +31,14 @@ use ruby_voice::CpalAudioCapture;
 pub mod commands;
 
 pub struct AppState {
-    pub orb_state: Mutex<OrbVisualState>,
-    pub seq_counter: AtomicU64,
+    pub orb_state: Arc<Mutex<OrbVisualState>>,
+    pub seq_counter: Arc<AtomicU64>,
     pub click_through: AtomicBool,
     pub remote_adapter: Arc<TelegramAdapter>,
+    pub chat_client: Arc<dyn ChatClient>,
+    pub chat_session: Arc<tokio::sync::Mutex<ChatSession>>,
+    pub tts_chain: Arc<TtsFallbackChain>,
+    pub tts_playback: Arc<TtsPlaybackController>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -82,11 +90,27 @@ pub fn run() {
     let bot_token = ruby_remote::get_telegram_bot_token().unwrap_or_default();
     let remote_adapter = Arc::new(TelegramAdapter::new(bot_token));
 
+    let chat_client: Arc<dyn ChatClient> = Arc::new(GeminiChatClient::default());
+    let chat_session = Arc::new(tokio::sync::Mutex::new(ChatSession::new()));
+    let tts_chain = Arc::new(TtsFallbackChain::new(vec![
+        Arc::new(EdgeTtsEngine::default()),
+        Arc::new(GeminiTtsEngine),
+        Arc::new(WindowsSpeechEngine),
+    ]));
+    let tts_playback = Arc::new(TtsPlaybackController::new());
+
+    let orb_state_ref = Arc::new(Mutex::new(OrbVisualState::default()));
+    let seq_counter_ref = Arc::new(AtomicU64::new(1));
+
     let builder = tauri::Builder::default().manage(AppState {
-        orb_state: Mutex::new(OrbVisualState::default()),
-        seq_counter: AtomicU64::new(1),
+        orb_state: Arc::clone(&orb_state_ref),
+        seq_counter: Arc::clone(&seq_counter_ref),
         click_through: AtomicBool::new(false),
         remote_adapter: Arc::clone(&remote_adapter),
+        chat_client,
+        chat_session,
+        tts_chain,
+        tts_playback,
     });
 
     #[cfg(feature = "test-capture")]
@@ -96,6 +120,8 @@ pub fn run() {
         commands::toggle_orb_click_through,
         commands::get_remote_status,
         commands::disconnect_remote,
+        commands::send_chat_message,
+        commands::cancel_speech,
         commands::save_orb_snapshot
     ]);
 
@@ -105,7 +131,9 @@ pub fn run() {
         commands::set_orb_state,
         commands::toggle_orb_click_through,
         commands::get_remote_status,
-        commands::disconnect_remote
+        commands::disconnect_remote,
+        commands::send_chat_message,
+        commands::cancel_speech
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);
@@ -160,9 +188,8 @@ pub fn run() {
                             "Error" => OperationalState::Error,
                             _ => OperationalState::Idle,
                         };
-                        let state = app_handle_cb.state::<AppState>();
-                        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst);
-                        let mut orb = state.orb_state.lock().unwrap();
+                        let seq = seq_counter_ref.fetch_add(1, Ordering::SeqCst) + 1;
+                        let mut orb = orb_state_ref.lock().unwrap();
                         orb.operational = op;
                         let payload = SequencedOrbEvent { seq, state: *orb };
                         let _ = app_handle_cb.emit("orb_state_changed", payload);
@@ -191,16 +218,24 @@ pub fn run() {
                                     let _ = dictation_engine.commit_pre_roll().await;
                                 }
                                 HotKeyAction::HoldReleased { .. } => {
-                                    let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
+                                    let target_proc =
+                                        ruby_platform::elevation_check::get_foreground_process_name();
                                     let res = dictation_engine.finish_and_insert(target_proc).await;
                                     if res.is_ok() {
                                         if let Some(backend) = dictation_engine.last_served_backend() {
                                             if backend.starts_with("freellmapi") {
-                                                let _ = app_handle.emit("console_notice", "served via FreeLLMAPI");
-                                                let _ = app_handle.emit("toast_notification", "served via FreeLLMAPI");
+                                                let _ = app_handle
+                                                    .emit("console_notice", "served via FreeLLMAPI");
+                                                let _ = app_handle.emit(
+                                                    "toast_notification",
+                                                    "served via FreeLLMAPI",
+                                                );
                                             }
                                         }
-                                    } else if let Err(ruby_dictation::DictationError::Insertion(ref s)) = res {
+                                    } else if let Err(ruby_dictation::DictationError::Insertion(
+                                        ref s,
+                                    )) = res
+                                    {
                                         if s.contains("ElevatedTargetBlocked") {
                                             let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
                                         }
@@ -210,16 +245,24 @@ pub fn run() {
                                     if active {
                                         let _ = dictation_engine.start_recording().await;
                                     } else {
-                                        let target_proc = ruby_platform::elevation_check::get_foreground_process_name();
+                                        let target_proc =
+                                            ruby_platform::elevation_check::get_foreground_process_name();
                                         let res = dictation_engine.finish_and_insert(target_proc).await;
                                         if res.is_ok() {
                                             if let Some(backend) = dictation_engine.last_served_backend() {
                                                 if backend.starts_with("freellmapi") {
-                                                    let _ = app_handle.emit("console_notice", "served via FreeLLMAPI");
-                                                    let _ = app_handle.emit("toast_notification", "served via FreeLLMAPI");
+                                                    let _ = app_handle
+                                                        .emit("console_notice", "served via FreeLLMAPI");
+                                                    let _ = app_handle.emit(
+                                                        "toast_notification",
+                                                        "served via FreeLLMAPI",
+                                                    );
                                                 }
                                             }
-                                        } else if let Err(ruby_dictation::DictationError::Insertion(ref s)) = res {
+                                        } else if let Err(ruby_dictation::DictationError::Insertion(
+                                            ref s,
+                                        )) = res
+                                        {
                                             if s.contains("ElevatedTargetBlocked") {
                                                 let _ = app_handle.emit("toast_notification", "Target window is elevated (Administrator). Run Ruby as Administrator to dictate into elevated prompts.");
                                             }

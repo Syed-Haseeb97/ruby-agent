@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { OrbPreviewPanel } from "./OrbPreviewPanel";
@@ -13,9 +13,41 @@ interface RemoteStatus {
   last_command_time_secs: number | null;
 }
 
+interface ChatTurnResult {
+  response_text: string;
+  emotion: string;
+  served_backend: string;
+  tts_engine: string;
+}
+
+interface MessageItem {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  emotion?: string;
+  servedBackend?: string;
+  ttsEngine?: string;
+  timestamp: string;
+}
+
 export const ConsoleView: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatus | null>(null);
+  const [messages, setMessages] = useState<MessageItem[]>([
+    {
+      id: "welcome-1",
+      role: "assistant",
+      text: "Good day. I am Ruby, your desktop companion. Type a request below or use the Wispr-style dictation chord (Ctrl+Win) to begin.",
+      emotion: "Neutral",
+      servedBackend: "gemini-3.8-flash",
+      ttsEngine: "Edge-TTS",
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    },
+  ]);
+  const [inputText, setInputText] = useState("");
+  const [isThinking, setIsThinking] = useState(false);
+  const [selectedTts, setSelectedTts] = useState("Edge-TTS");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const fetchRemoteStatus = async () => {
     try {
@@ -36,6 +68,78 @@ export const ConsoleView: React.FC = () => {
       setNotice(`Failed to disconnect: ${String(err)}`);
     }
   };
+
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const trimmed = inputText.trim();
+    if (!trimmed || isThinking) return;
+
+    const userMsg: MessageItem = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      text: trimmed,
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    };
+
+    setMessages((prev) => [...prev, userMsg]);
+    setInputText("");
+    setIsThinking(true);
+
+    try {
+      const result = await invoke<ChatTurnResult>("send_chat_message", {
+        message: trimmed,
+        ttsEngine: selectedTts,
+      });
+
+      const assistantMsg: MessageItem = {
+        id: `asst-${Date.now()}`,
+        role: "assistant",
+        text: result.response_text,
+        emotion: result.emotion,
+        servedBackend: result.served_backend,
+        ttsEngine: result.tts_engine,
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+
+      setMessages((prev) => [...prev, assistantMsg]);
+    } catch (err) {
+      const errorMsg: MessageItem = {
+        id: `err-${Date.now()}`,
+        role: "assistant",
+        text: `Error: ${String(err)}`,
+        emotion: "Sad",
+        servedBackend: "Error",
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      };
+      setMessages((prev) => [...prev, errorMsg]);
+    } finally {
+      setIsThinking(false);
+    }
+  };
+
+  const handleCancelSpeech = async () => {
+    try {
+      await invoke("cancel_speech");
+      setNotice("Speech cancelled.");
+      setTimeout(() => setNotice(null), 3000);
+    } catch {
+      // Ignore
+    }
+  };
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isThinking]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleCancelSpeech();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   useEffect(() => {
     fetchRemoteStatus();
@@ -141,7 +245,7 @@ export const ConsoleView: React.FC = () => {
                 <span>NOTICE: {notice}</span>
               </div>
             )}
-            {/* Static Eyebrow Status Capsule (Strictly no blinking/pulsing dots) */}
+            {/* Static Eyebrow Status Capsule (Strictly static, zero pulsing dots) */}
             <div
               style={{
                 display: "inline-flex",
@@ -158,7 +262,7 @@ export const ConsoleView: React.FC = () => {
                 color: "#1D6B52",
               }}
             >
-              <span>TAURI 2.0 • M0 FOUNDATION READY</span>
+              <span>TAURI 2.0 • M2 CONVERSATIONAL ENGINE</span>
             </div>
           </div>
         </header>
@@ -211,13 +315,13 @@ export const ConsoleView: React.FC = () => {
                 marginBottom: "0.5rem",
               }}
             >
-              Wispr Dictation Hotkey
+              Model Routing
             </div>
             <div style={{ fontSize: "1.125rem", fontWeight: 600, color: "#16181D" }}>
-              Ctrl + Win
+              gemini-3.8-flash
             </div>
             <p style={{ margin: "0.25rem 0 0", color: "#5F626A", fontSize: "0.8125rem" }}>
-              WH_KEYBOARD_LL low-level hook
+              Fallback: 3-flash-preview
             </p>
           </div>
 
@@ -239,18 +343,223 @@ export const ConsoleView: React.FC = () => {
                 marginBottom: "0.5rem",
               }}
             >
-              Emergency Kill Switch
+              Voice Synthesis
             </div>
-            <div style={{ fontSize: "1.125rem", fontWeight: 600, color: "#B53A26" }}>
-              Ctrl+Alt+Shift+R
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <select
+                value={selectedTts}
+                onChange={(e) => setSelectedTts(e.target.value)}
+                style={{
+                  border: "1px solid #C8C2B5",
+                  borderRadius: "0.5rem",
+                  padding: "0.25rem 0.5rem",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "12px",
+                  backgroundColor: "#F5F3EE",
+                  color: "#16181D",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="Edge-TTS">Edge-TTS (Neural)</option>
+                <option value="Gemini-TTS">Gemini-TTS (API)</option>
+                <option value="Windows-Speech">Windows-Speech (SAPI)</option>
+              </select>
             </div>
             <p style={{ margin: "0.25rem 0 0", color: "#5F626A", fontSize: "0.8125rem" }}>
-              Instant process &amp; input release
+              Esc or new input cancels
             </p>
           </div>
         </div>
 
-        {/* Phase R0 Remote Control Status */}
+        {/* Milestone M2 Conversational Chat Section */}
+        <section
+          style={{
+            backgroundColor: "#FFFFFF",
+            border: "1px solid #C8C2B5",
+            borderRadius: "1rem",
+            padding: "1.5rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "1.25rem",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.75rem",
+                  fontWeight: 400,
+                  margin: 0,
+                  color: "#16181D",
+                }}
+              >
+                Editorial Dialogue Stream
+              </h2>
+              <p style={{ margin: "0.25rem 0 0", color: "#5F626A", fontSize: "0.875rem" }}>
+                Multi-turn conversation with real-time emotion tagging and non-blocking speech playback.
+              </p>
+            </div>
+
+            <button
+              onClick={handleCancelSpeech}
+              style={{
+                border: "1px solid #C8C2B5",
+                backgroundColor: "#FFFFFF",
+                borderRadius: "9999px",
+                padding: "0.35rem 0.85rem",
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                color: "#16181D",
+                cursor: "pointer",
+              }}
+            >
+              Stop Audio (Esc)
+            </button>
+          </div>
+
+          {/* Messages Stream Container */}
+          <div
+            style={{
+              maxHeight: "360px",
+              minHeight: "220px",
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: "1rem",
+              padding: "1rem",
+              backgroundColor: "#F5F3EE",
+              borderRadius: "0.75rem",
+              border: "1px solid #C8C2B5",
+            }}
+          >
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                style={{
+                  alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
+                  maxWidth: "80%",
+                  backgroundColor: msg.role === "user" ? "#16181D" : "#FFFFFF",
+                  color: msg.role === "user" ? "#F5F3EE" : "#16181D",
+                  padding: "0.875rem 1.125rem",
+                  borderRadius: "1rem",
+                  border: msg.role === "user" ? "none" : "1px solid #C8C2B5",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                    marginBottom: "0.35rem",
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "10px",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.06em",
+                    color: msg.role === "user" ? "#C8C2B5" : "#5F626A",
+                  }}
+                >
+                  <span>{msg.role === "user" ? "You" : "Ruby"}</span>
+                  <span>•</span>
+                  <span>{msg.timestamp}</span>
+                  {msg.emotion && (
+                    <span
+                      style={{
+                        backgroundColor: "#E3EFE8",
+                        color: "#1D6B52",
+                        padding: "0.1rem 0.4rem",
+                        borderRadius: "9999px",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {msg.emotion.toUpperCase()}
+                    </span>
+                  )}
+                  {msg.servedBackend && (
+                    <span
+                      style={{
+                        backgroundColor: msg.servedBackend.toLowerCase().includes("freellmapi")
+                          ? "#F6ECD9"
+                          : "#F5F3EE",
+                        color: msg.servedBackend.toLowerCase().includes("freellmapi")
+                          ? "#86560D"
+                          : "#5F626A",
+                        padding: "0.1rem 0.4rem",
+                        borderRadius: "9999px",
+                        border: "1px solid #C8C2B5",
+                      }}
+                    >
+                      {msg.servedBackend.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: "0.9375rem", lineHeight: "1.45" }}>{msg.text}</div>
+              </div>
+            ))}
+            {isThinking && (
+              <div
+                style={{
+                  alignSelf: "flex-start",
+                  backgroundColor: "#FFFFFF",
+                  padding: "0.75rem 1rem",
+                  borderRadius: "1rem",
+                  border: "1px solid #C8C2B5",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  color: "#5F626A",
+                }}
+              >
+                Thinking & generating response...
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Message Input Form */}
+          <form onSubmit={handleSendMessage} style={{ display: "flex", gap: "0.75rem" }}>
+            <input
+              type="text"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="Ask Ruby anything, or state how you are feeling..."
+              disabled={isThinking}
+              style={{
+                flex: 1,
+                border: "1px solid #C8C2B5",
+                borderRadius: "9999px",
+                padding: "0.75rem 1.25rem",
+                fontFamily: "'Geist', sans-serif",
+                fontSize: "0.9375rem",
+                backgroundColor: "#FFFFFF",
+                color: "#16181D",
+                outline: "none",
+              }}
+            />
+            <button
+              type="submit"
+              disabled={isThinking || !inputText.trim()}
+              style={{
+                backgroundColor: "#16181D",
+                color: "#F5F3EE",
+                borderRadius: "9999px",
+                padding: "0.75rem 1.5rem",
+                fontFamily: "'Geist', sans-serif",
+                fontWeight: 500,
+                fontSize: "0.9375rem",
+                border: "none",
+                cursor: isThinking || !inputText.trim() ? "not-allowed" : "pointer",
+                opacity: isThinking || !inputText.trim() ? 0.6 : 1.0,
+              }}
+            >
+              Send
+            </button>
+          </form>
+        </section>
+
+        {/* Telegram Remote Section */}
         <section
           style={{
             backgroundColor: "#FFFFFF",
@@ -259,8 +568,61 @@ export const ConsoleView: React.FC = () => {
             padding: "1.5rem",
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "1rem" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: "1rem",
+            }}
+          >
             <div>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.75rem",
+                  fontWeight: 400,
+                  margin: 0,
+                  color: "#16181D",
+                }}
+              >
+                Telegram Remote Control
+              </h2>
+              <p style={{ margin: "0.25rem 0 0", color: "#5F626A", fontSize: "0.875rem" }}>
+                Outbound-only secure polling. No public webhooks, no port forwarding.
+              </p>
+            </div>
+
+            {remoteStatus?.paired ? (
+              <button
+                onClick={handleDisconnect}
+                style={{
+                  border: "1px solid #C8C2B5",
+                  backgroundColor: "#FFFFFF",
+                  borderRadius: "9999px",
+                  padding: "0.375rem 0.875rem",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  color: "#B53A26",
+                  cursor: "pointer",
+                }}
+              >
+                Disconnect Remote
+              </button>
+            ) : null}
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1rem" }}>
+            <div
+              style={{
+                backgroundColor: "#F5F3EE",
+                border: "1px solid #C8C2B5",
+                borderRadius: "0.75rem",
+                padding: "1rem",
+              }}
+            >
               <div
                 style={{
                   fontFamily: "'Geist Mono', monospace",
@@ -271,146 +633,74 @@ export const ConsoleView: React.FC = () => {
                   marginBottom: "0.25rem",
                 }}
               >
-                Channel Adapter • Phase R0
+                Pairing Status
               </div>
-              <h2
-                style={{
-                  fontFamily: "'Instrument Serif', serif",
-                  fontSize: "1.5rem",
-                  fontWeight: 400,
-                  margin: 0,
-                  color: "#16181D",
-                }}
-              >
-                Telegram Remote Control
-              </h2>
-            </div>
-
-            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-              {remoteStatus?.paired ? (
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    borderRadius: "9999px",
-                    border: "1px solid #1D6B52",
-                    backgroundColor: "#E3EFE8",
-                    padding: "0.2rem 0.75rem",
-                    fontFamily: "'Geist Mono', monospace",
-                    fontSize: "11px",
-                    textTransform: "uppercase",
-                    color: "#1D6B52",
-                  }}
-                >
-                  <span>PAIRED • USER {remoteStatus.paired_user_id}</span>
-                </div>
-              ) : (
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    borderRadius: "9999px",
-                    border: "1px solid #86560D",
-                    backgroundColor: "#F6ECD9",
-                    padding: "0.2rem 0.75rem",
-                    fontFamily: "'Geist Mono', monospace",
-                    fontSize: "11px",
-                    textTransform: "uppercase",
-                    color: "#86560D",
-                  }}
-                >
-                  <span>UNPAIRED</span>
-                </div>
-              )}
-
-              {remoteStatus?.paired && (
-                <button
-                  onClick={handleDisconnect}
-                  style={{
-                    border: "1px solid #C8C2B5",
-                    backgroundColor: "#FFFFFF",
-                    color: "#B53A26",
-                    borderRadius: "9999px",
-                    padding: "0.25rem 0.75rem",
-                    fontFamily: "'Geist Mono', monospace",
-                    fontSize: "11px",
-                    textTransform: "uppercase",
-                    cursor: "pointer",
-                    fontWeight: 500,
-                  }}
-                >
-                  Disconnect remote
-                </button>
-              )}
-            </div>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "1rem", marginTop: "1rem" }}>
-            <div>
-              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
-                Connection State
+              <div style={{ fontSize: "1rem", fontWeight: 600, color: "#16181D" }}>
+                {remoteStatus?.paired
+                  ? `Paired with User #${remoteStatus.paired_user_id}`
+                  : "Unpaired (Standalone Mode)"}
               </div>
-              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
-                {remoteStatus?.connected ? "Active Polling (Long Poll)" : "Idle / Disconnected"}
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
-                Last Command Time
-              </div>
-              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
-                {remoteStatus?.last_command_time_secs
-                  ? `${Math.floor((Date.now() / 1000 - remoteStatus.last_command_time_secs) / 60)}m ago`
-                  : "None recorded"}
-              </div>
-            </div>
-
-            <div>
-              <div style={{ fontFamily: "'Geist Mono', monospace", fontSize: "10px", textTransform: "uppercase", color: "#5F626A" }}>
-                Active Pairing Code
-              </div>
-              <div style={{ fontSize: "0.9375rem", fontWeight: 600, color: "#16181D", marginTop: "0.25rem" }}>
-                {remoteStatus?.active_pairing_code ? (
-                  <span style={{ color: "#1D6B52", letterSpacing: "0.1em" }}>
-                    {remoteStatus.active_pairing_code} ({remoteStatus.pairing_code_expires_in_secs}s remaining)
+              {!remoteStatus?.paired && remoteStatus?.active_pairing_code && (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <span
+                    style={{
+                      fontFamily: "'Geist Mono', monospace",
+                      fontSize: "1.25rem",
+                      fontWeight: 700,
+                      backgroundColor: "#FFFFFF",
+                      border: "1px solid #C8C2B5",
+                      padding: "0.25rem 0.5rem",
+                      borderRadius: "0.25rem",
+                      letterSpacing: "0.1em",
+                    }}
+                  >
+                    {remoteStatus.active_pairing_code}
                   </span>
-                ) : (
-                  "—"
-                )}
-              </div>
+                  <p
+                    style={{
+                      margin: "0.35rem 0 0",
+                      color: "#86560D",
+                      fontSize: "11px",
+                      fontFamily: "'Geist Mono', monospace",
+                    }}
+                  >
+                    Send /pair {remoteStatus.active_pairing_code} to bot within 5 minutes
+                  </p>
+                </div>
+              )}
             </div>
-          </div>
 
-          {!remoteStatus?.paired && remoteStatus?.active_pairing_code && (
             <div
               style={{
-                marginTop: "1rem",
-                padding: "0.75rem",
                 backgroundColor: "#F5F3EE",
                 border: "1px solid #C8C2B5",
-                borderRadius: "0.5rem",
-                fontSize: "0.8125rem",
-                color: "#5F626A",
+                borderRadius: "0.75rem",
+                padding: "1rem",
               }}
             >
-              <strong style={{ color: "#16181D" }}>Pairing Instructions:</strong> Open your Telegram app, message your bot, and send{" "}
-              <code style={{ color: "#16181D", backgroundColor: "#FFFFFF", padding: "0.1rem 0.3rem", borderRadius: "3px" }}>
-                /pair {remoteStatus.active_pairing_code}
-              </code>
-              . The code is single-use and expires in 5 minutes.
+              <div
+                style={{
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "10px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "#5F626A",
+                  marginBottom: "0.25rem",
+                }}
+              >
+                Inbound Long Polling
+              </div>
+              <div style={{ fontSize: "1rem", fontWeight: 600, color: "#16181D" }}>
+                {remoteStatus?.connected ? "Active (Outbound HTTPS)" : "Disabled / Offline"}
+              </div>
+              <p style={{ margin: "0.25rem 0 0", color: "#5F626A", fontSize: "0.8125rem" }}>
+                Offset persisted; replay prevented on restart
+              </p>
             </div>
-          )}
+          </div>
         </section>
 
-        {/* Orb Verification & Acceptance Section */}
-        <section>
-          <OrbPreviewPanel />
-        </section>
-
-        {/* System Parity Architecture Summary */}
+        {/* Orb Expression Preview Panel */}
         <section
           style={{
             backgroundColor: "#FFFFFF",
@@ -419,32 +709,7 @@ export const ConsoleView: React.FC = () => {
             padding: "1.5rem",
           }}
         >
-          <h2
-            style={{
-              fontFamily: "'Instrument Serif', serif",
-              fontSize: "1.5rem",
-              fontWeight: 400,
-              margin: "0 0 1rem",
-              color: "#16181D",
-            }}
-          >
-            M0 Architecture Verification Summary
-          </h2>
-          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", fontSize: "0.875rem", color: "#5F626A" }}>
-            <div>
-              <strong style={{ color: "#16181D" }}>Orb Transparency &amp; Non-Activating:</strong>{" "}
-              Excluded from screen captures via <code>SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)</code>,{" "}
-              <code>WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE</code>, and DWM shadow disabled.
-            </div>
-            <div>
-              <strong style={{ color: "#16181D" }}>Canvas 2D Fidelity:</strong> 1:1 port of PyQt6 LiquidBlob{" "}
-              (commit <code>7bc2c3a</code>). Preserves exact wave equations, 30 FPS cap, Thinking 3D yaw, and the strict black-core rule.
-            </div>
-            <div>
-              <strong style={{ color: "#16181D" }}>Typed IPC Bridge:</strong> Sequence-numbered events{" "}
-              (<code>seq: u64</code>) preventing stale responses; only operational state and emotion labels cross the orb IPC boundary.
-            </div>
-          </div>
+          <OrbPreviewPanel />
         </section>
       </div>
     </div>

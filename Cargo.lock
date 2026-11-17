@@ -3393,6 +3393,7 @@ dependencies = [
  "keyring",
  "regex",
  "reqwest 0.12.28",
+ "ruby-config",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use chat_client::{
-    ChatClient, ChatMessage as GeminiChatMessage, ChatRole as GeminiChatRole, ChatTurnResponse,
-    MockChatClient,
+    ChatClient, ChatMessage, ChatMessage as GeminiChatMessage, ChatRole,
+    ChatRole as GeminiChatRole, ChatTurnResponse, GeminiChatClient, MockChatClient,
 };
 pub use dictation_client::{DictationClient, GeminiDictationClient, MockDictationClient};
 pub use key_storage::{get_gemini_api_key, set_gemini_api_key};

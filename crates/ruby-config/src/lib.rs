@@ -62,6 +62,31 @@ impl RubyPaths {
     }
 }
 
+pub const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are Ruby, an editorial-grade, warm, and highly capable desktop companion and personal AI assistant. \
+Respond to the user naturally, warmly, and helpfully. Keep your responses concise and precise. \
+Also classify the tone that Ruby should express while delivering this response. \
+Choose exactly one emotion from this list: neutral, happy, excited, sad, empathetic, curious, surprised. \
+When the user shares a difficult experience or expresses distress, choose empathetic (a calm, supportive expression), not sad. \
+Use sad only when sadness itself is the appropriate emotional tone, not as a mechanical reaction to negative words. \
+Keep the response itself free of emotion metadata. \
+Return ONLY a valid JSON object with exactly these keys: \
+{\"response\": \"the user-facing answer\", \"emotion\": \"one allowed label\"}.";
+
+/// Load system prompt from config file or return default.
+pub fn load_system_prompt() -> String {
+    let custom_path = directories::ProjectDirs::from("com", "ruby", "RubyAssistant")
+        .map(|p| p.config_dir().join("system_prompt.txt"));
+    if let Some(path) = custom_path {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if !content.trim().is_empty() {
+                return content;
+            }
+        }
+    }
+    DEFAULT_SYSTEM_PROMPT.to_string()
+}
+
 pub trait SecretStore: Send + Sync {
     fn get_gemini_api_key(&self) -> Result<Option<String>, ConfigError>;
     fn set_gemini_api_key(&self, key: &str) -> Result<(), ConfigError>;
