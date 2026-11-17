@@ -110,13 +110,14 @@ pub trait DictationEngine: Send + Sync {
 mod tests {
     use super::*;
     use ruby_gemini::MockDictationClient;
-    use ruby_platform::MockDesktopController;
-    use ruby_voice::{AudioSource, MockAudioSource};
+    use ruby_platform::hook_types::{VK_LCONTROL_VALUE, VK_LWIN_VALUE};
+    use ruby_platform::{HotKeyAction, HotKeyStateMachine, MockDesktopController, RawKeyEvent};
+    use ruby_voice::{AudioSource, MockAudioSource, MockAudioTracker};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     #[tokio::test]
-    async fn test_full_dictation_pipeline_with_mocks() {
+    async fn test_mock_level_full_dictation_pipeline_with_mocks() {
         let state_transitions = Arc::new(AtomicUsize::new(0));
         let st_clone = Arc::clone(&state_transitions);
 
@@ -151,7 +152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dictation_network_failure_and_retry() {
+    async fn test_mock_level_dictation_network_failure_and_retry() {
         let audio = Box::new(MockAudioSource::default());
         let gemini_failing = Box::new(MockDictationClient::new_failing());
         let desktop = Box::new(MockDesktopController::default());
@@ -164,6 +165,7 @@ mod tests {
             .await;
         assert!(res.is_err());
         assert_eq!(engine.current_state().await, DictationState::Error);
+        assert!(engine.has_retained_audio().await);
 
         // Retry without re-recording (still fails with mock_failing, but verifies audio buffer was retained)
         let retry_res = engine.retry_last_dictation().await;
@@ -172,7 +174,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dictation_cancellation() {
+    async fn test_mock_level_dictation_cancellation() {
         let audio = Box::new(MockAudioSource::default());
         let gemini = Box::new(MockDictationClient::default());
         let desktop = Box::new(MockDesktopController::default());
@@ -205,7 +207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pre_roll_preserves_speech_starting_at_100ms_before_250ms_commit() {
+    async fn test_mock_level_pre_roll_preserves_speech_starting_at_100ms_before_250ms_commit() {
         const EARLY_SPEECH_VAL: i16 = 7777;
         const LATER_SPEECH_VAL: i16 = 3333;
 
@@ -246,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pre_roll_discard_on_early_release() {
+    async fn test_mock_level_pre_roll_discard_on_early_release() {
         let audio = Box::new(MockAudioSource::default());
         let gemini = Box::new(MockDictationClient::default());
         let desktop = Box::new(MockDesktopController::default());
@@ -320,5 +322,179 @@ mod tests {
         // 3. Elapsed recording reaches 5 minutes (300,000ms) -> AutoStopMaxDuration
         let action_timeout = engine.evaluate_hands_free_safety(300_000, 500);
         assert_eq!(action_timeout, HandsFreeAction::AutoStopMaxDuration);
+    }
+
+    /// ENGINE-LEVEL TEST:
+    /// Drives the real hotkey state machine -> engine dispatch path with a mock AudioSource.
+    /// Asserts:
+    /// 1. `start_recording` is called immediately on key-down (before the 250 ms hold qualifies).
+    /// 2. `discard_recording` happens on early release (<250 ms tap).
+    /// 3. Subsequent qualified hold (>=250 ms) commits recording and finishes on release.
+    #[tokio::test]
+    async fn test_engine_level_hotkey_to_engine_preroll_and_early_release() {
+        let tracker = Arc::new(std::sync::Mutex::new(MockAudioTracker::default()));
+        let mock_audio = MockAudioSource::with_tracker(vec![1000i16; 16000], Arc::clone(&tracker));
+        let gemini = Box::new(MockDictationClient::new(
+            "Transcribed via engine level hotkey test",
+        ));
+        let desktop = Box::new(MockDesktopController::default());
+
+        let engine = SystemDictationEngine::new(Box::new(mock_audio), gemini, desktop, None);
+        let mut hsm = HotKeyStateMachine::default();
+
+        // Initial baseline assertions
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(snap.start_call_count, 0);
+            assert_eq!(snap.discard_call_count, 0);
+            assert_eq!(snap.commit_call_count, 0);
+            assert!(!snap.is_recording);
+            assert!(!snap.is_committed);
+        }
+
+        // STEP 1: User presses Ctrl at t = 0 ms
+        let ctrl_down = RawKeyEvent {
+            vk_code: VK_LCONTROL_VALUE,
+            is_up: false,
+            is_injected: false,
+            timestamp_ms: 0,
+        };
+        let actions1 = hsm.feed_key(ctrl_down, 0);
+        assert!(actions1.is_empty(), "Plain Ctrl down must emit no action");
+
+        // STEP 2: User presses Win at t = 10 ms (dictation chord engaged!)
+        let win_down = RawKeyEvent {
+            vk_code: VK_LWIN_VALUE,
+            is_up: false,
+            is_injected: false,
+            timestamp_ms: 10,
+        };
+        let actions2 = hsm.feed_key(win_down, 10);
+        assert_eq!(
+            actions2,
+            vec![HotKeyAction::PreRollStarted],
+            "Chord key-down must emit PreRollStarted"
+        );
+
+        // Drive the real engine dispatch path
+        for action in actions2 {
+            engine.handle_hotkey_action(action, None).await.unwrap();
+        }
+
+        // ASSERTION: start_recording is called on key-down BEFORE 250ms hold qualifies!
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(
+                snap.start_call_count, 1,
+                "start_recording MUST be called on key-down before 250ms qualifies"
+            );
+            assert!(
+                snap.is_recording,
+                "AudioSource must be actively recording into pre-roll buffer"
+            );
+            assert!(
+                !snap.is_committed,
+                "Pre-roll must NOT be committed yet (elapsed = 10ms < 250ms)"
+            );
+        }
+        // State remains Idle so no visual disturbance or cues fire yet
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+
+        // STEP 3: Early release at t = 80 ms (total chord hold = 70 ms < 250 ms)
+        let win_up = RawKeyEvent {
+            vk_code: VK_LWIN_VALUE,
+            is_up: true,
+            is_injected: false,
+            timestamp_ms: 80,
+        };
+        let actions3 = hsm.feed_key(win_up, 80);
+        assert_eq!(
+            actions3,
+            vec![HotKeyAction::PreRollDiscarded],
+            "Early release must emit PreRollDiscarded"
+        );
+
+        // Drive the real engine dispatch path
+        for action in actions3 {
+            engine.handle_hotkey_action(action, None).await.unwrap();
+        }
+
+        // ASSERTION: discard happened on early release
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(
+                snap.discard_call_count, 1,
+                "discard_recording MUST be called on early release"
+            );
+            assert!(
+                !snap.is_recording,
+                "AudioSource must no longer be recording after discard"
+            );
+            assert!(!snap.is_committed);
+        }
+        assert_eq!(engine.current_state().await, DictationState::Idle);
+
+        // STEP 4: Full qualified hold test on same engine
+        // User engages chord again at t = 500 ms
+        let win_down_2 = RawKeyEvent {
+            vk_code: VK_LWIN_VALUE,
+            is_up: false,
+            is_injected: false,
+            timestamp_ms: 500,
+        };
+        let actions4 = hsm.feed_key(win_down_2, 500);
+        assert_eq!(actions4, vec![HotKeyAction::PreRollStarted]);
+        for action in actions4 {
+            engine.handle_hotkey_action(action, None).await.unwrap();
+        }
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(snap.start_call_count, 2);
+            assert!(snap.is_recording);
+            assert!(!snap.is_committed);
+        }
+
+        // Hold qualifies at t = 750 ms (250 ms elapsed)
+        let tick_actions = hsm.tick(750);
+        assert_eq!(tick_actions, vec![HotKeyAction::HoldStarted]);
+        for action in tick_actions {
+            engine.handle_hotkey_action(action, None).await.unwrap();
+        }
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(snap.commit_call_count, 1, "commit_recording must be called");
+            assert!(snap.is_committed);
+        }
+        assert_eq!(
+            engine.current_state().await,
+            DictationState::Recording,
+            "Engine must transition to Recording (Orb -> Listening)"
+        );
+
+        // Release at t = 1000 ms
+        let win_up_2 = RawKeyEvent {
+            vk_code: VK_LWIN_VALUE,
+            is_up: true,
+            is_injected: false,
+            timestamp_ms: 1000,
+        };
+        let release_actions = hsm.feed_key(win_up_2, 1000);
+        assert!(matches!(
+            release_actions.first(),
+            Some(HotKeyAction::HoldReleased { duration_ms }) if *duration_ms == 500
+        ));
+        for action in release_actions {
+            engine
+                .handle_hotkey_action(action, Some("notepad.exe".to_string()))
+                .await
+                .unwrap();
+        }
+        {
+            let snap = tracker.lock().unwrap().clone();
+            assert_eq!(snap.stop_call_count, 1, "stop_recording must be called");
+            assert!(!snap.is_recording);
+        }
+        assert_eq!(engine.current_state().await, DictationState::Idle);
     }
 }

@@ -328,4 +328,46 @@ impl SystemDictationEngine {
         self.emit_cue(DictationCue::Cancel);
         info!("Dictation cancelled");
     }
+
+    /// Returns true if an in-memory audio buffer is retained for retry.
+    pub async fn has_retained_audio(&self) -> bool {
+        self.last_audio_wav.lock().await.is_some()
+    }
+
+    /// Dispatches a high-level HotKeyAction directly into the dictation engine pipeline.
+    pub async fn handle_hotkey_action(
+        &self,
+        action: ruby_platform::HotKeyAction,
+        foreground_process: Option<String>,
+    ) -> Result<(), DictationError> {
+        match action {
+            ruby_platform::HotKeyAction::PreRollStarted => {
+                self.start_pre_roll().await?;
+            }
+            ruby_platform::HotKeyAction::PreRollDiscarded => {
+                self.discard_pre_roll().await?;
+            }
+            ruby_platform::HotKeyAction::HoldStarted => {
+                self.commit_pre_roll().await?;
+            }
+            ruby_platform::HotKeyAction::HoldReleased { .. } => {
+                let _ = self.finish_and_insert(foreground_process).await?;
+            }
+            ruby_platform::HotKeyAction::DoubleTapToggled { active } => {
+                if active {
+                    self.start_recording().await?;
+                } else {
+                    let _ = self.finish_and_insert(foreground_process).await?;
+                }
+            }
+            ruby_platform::HotKeyAction::Cancelled
+            | ruby_platform::HotKeyAction::AbortedThirdKey { .. } => {
+                self.cancel().await;
+            }
+            ruby_platform::HotKeyAction::KillSwitchTriggered => {
+                self.cancel().await;
+            }
+        }
+        Ok(())
+    }
 }

@@ -204,11 +204,27 @@ impl AudioSource for CpalAudioCapture {
     }
 }
 
+/// Observable call tracker for mock audio tests.
+#[derive(Debug, Default, Clone)]
+pub struct MockAudioTracker {
+    pub is_recording: bool,
+    pub is_committed: bool,
+    pub start_call_count: usize,
+    pub commit_call_count: usize,
+    pub discard_call_count: usize,
+    pub stop_call_count: usize,
+}
+
 /// Mock AudioSource providing deterministic synthetic audio for offline tests and CI.
 pub struct MockAudioSource {
     samples: Vec<i16>,
     pub is_recording: bool,
     pub is_committed: bool,
+    pub start_call_count: usize,
+    pub commit_call_count: usize,
+    pub discard_call_count: usize,
+    pub stop_call_count: usize,
+    tracker: Option<std::sync::Arc<std::sync::Mutex<MockAudioTracker>>>,
     recorded_buffer: Vec<i16>,
 }
 
@@ -224,6 +240,11 @@ impl Default for MockAudioSource {
             samples,
             is_recording: false,
             is_committed: false,
+            start_call_count: 0,
+            commit_call_count: 0,
+            discard_call_count: 0,
+            stop_call_count: 0,
+            tracker: None,
             recorded_buffer: Vec::new(),
         }
     }
@@ -235,6 +256,28 @@ impl MockAudioSource {
             samples,
             is_recording: false,
             is_committed: false,
+            start_call_count: 0,
+            commit_call_count: 0,
+            discard_call_count: 0,
+            stop_call_count: 0,
+            tracker: None,
+            recorded_buffer: Vec::new(),
+        }
+    }
+
+    pub fn with_tracker(
+        samples: Vec<i16>,
+        tracker: std::sync::Arc<std::sync::Mutex<MockAudioTracker>>,
+    ) -> Self {
+        Self {
+            samples,
+            is_recording: false,
+            is_committed: false,
+            start_call_count: 0,
+            commit_call_count: 0,
+            discard_call_count: 0,
+            stop_call_count: 0,
+            tracker: Some(tracker),
             recorded_buffer: Vec::new(),
         }
     }
@@ -252,26 +295,57 @@ impl AudioSource for MockAudioSource {
     fn start_recording(&mut self) -> Result<(), VoiceError> {
         self.is_recording = true;
         self.is_committed = false;
+        self.start_call_count += 1;
         self.recorded_buffer.clear();
+        if let Some(ref t) = self.tracker {
+            if let Ok(mut lock) = t.lock() {
+                lock.is_recording = true;
+                lock.is_committed = false;
+                lock.start_call_count += 1;
+            }
+        }
         Ok(())
     }
 
     fn commit_recording(&mut self) -> Result<(), VoiceError> {
         self.is_committed = true;
+        self.commit_call_count += 1;
+        if let Some(ref t) = self.tracker {
+            if let Ok(mut lock) = t.lock() {
+                lock.is_committed = true;
+                lock.commit_call_count += 1;
+            }
+        }
         Ok(())
     }
 
     fn discard_recording(&mut self) -> Result<(), VoiceError> {
         self.is_recording = false;
         self.is_committed = false;
+        self.discard_call_count += 1;
         self.recorded_buffer.clear();
         self.samples.clear();
+        if let Some(ref t) = self.tracker {
+            if let Ok(mut lock) = t.lock() {
+                lock.is_recording = false;
+                lock.is_committed = false;
+                lock.discard_call_count += 1;
+            }
+        }
         Ok(())
     }
 
     fn stop_recording(&mut self) -> Result<Vec<i16>, VoiceError> {
         self.is_recording = false;
         self.is_committed = false;
+        self.stop_call_count += 1;
+        if let Some(ref t) = self.tracker {
+            if let Ok(mut lock) = t.lock() {
+                lock.is_recording = false;
+                lock.is_committed = false;
+                lock.stop_call_count += 1;
+            }
+        }
         if !self.recorded_buffer.is_empty() {
             Ok(std::mem::take(&mut self.recorded_buffer))
         } else {
@@ -285,7 +359,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pre_roll_timeline_preserves_speech_starting_at_100ms_before_250ms_commit() {
+    fn test_mock_level_pre_roll_timeline_preserves_speech_starting_at_100ms_before_250ms_commit() {
         // Realistic hardware timeline:
         // t = 0ms: Key-down event -> start_recording() opens pre-roll buffer.
         // t = 0..100ms: 100ms of ambient silence (1600 samples @ 16kHz).
@@ -347,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_old_behavior_without_preroll_fails_to_capture_early_speech() {
+    fn test_mock_level_old_behavior_without_preroll_fails_to_capture_early_speech() {
         // Models the OLD behavior where recording started ONLY at commit (t=250ms):
         const EARLY_SPEECH_VAL: i16 = 7777;
         const LATER_SPEECH_VAL: i16 = 3333;
@@ -386,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_roll_discard_on_early_release() {
+    fn test_mock_level_pre_roll_discard_on_early_release() {
         let mut mock_source = MockAudioSource::default();
         mock_source.start_recording().unwrap();
         assert!(mock_source.is_recording);

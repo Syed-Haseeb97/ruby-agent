@@ -15,15 +15,72 @@ use crate::GeminiError;
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 const API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
-/// Per-attempt timeout for the primary Gemini model (3.0 seconds).
-/// If the primary model does not respond within this window, it is considered unhealthy.
+/// Base per-attempt timeout for the primary Gemini model (3.0 seconds).
 pub const PRIMARY_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(3000);
 
-/// Per-attempt timeout for the fallback Gemini model (5.0 seconds).
+/// Base per-attempt timeout for the fallback Gemini model (5.0 seconds).
 pub const FALLBACK_PER_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(5000);
 
 /// Cooldown duration during which an unhealthy primary model is bypassed (60 seconds).
 pub const PRIMARY_UNHEALTHY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Audio duration threshold (seconds) under which timeouts trigger the 60s unhealthy lockout.
+/// Slow responses on audio longer than this threshold do NOT mark the primary unhealthy.
+pub const SHORT_AUDIO_THRESHOLD_SECS: f64 = 5.0;
+
+/// Computes the duration in seconds of a standard 16 kHz 16-bit mono WAV payload.
+pub fn calculate_audio_duration_secs(wav_bytes: &[u8]) -> f64 {
+    if wav_bytes.len() <= 44 {
+        0.0
+    } else {
+        (wav_bytes.len() - 44) as f64 / 32_000.0 // 16,000 Hz * 2 bytes/sample
+    }
+}
+
+/// Dynamic timeout configuration scaling with audio duration:
+/// timeout = min(base + k * duration_secs, cap)
+#[derive(Debug, Clone, Copy)]
+pub struct TimeoutConfig {
+    pub primary_base_ms: u64,
+    pub primary_scale_per_sec_ms: u64,
+    pub primary_cap_ms: u64,
+    pub fallback_base_ms: u64,
+    pub fallback_scale_per_sec_ms: u64,
+    pub fallback_cap_ms: u64,
+    pub short_audio_threshold_secs: f64,
+}
+
+impl Default for TimeoutConfig {
+    fn default() -> Self {
+        Self {
+            primary_base_ms: 3000,
+            primary_scale_per_sec_ms: 200, // 200ms extra per second of audio
+            primary_cap_ms: 12000,         // 12.0s max timeout for primary
+            fallback_base_ms: 5000,
+            fallback_scale_per_sec_ms: 300, // 300ms extra per second of audio
+            fallback_cap_ms: 15000,         // 15.0s max timeout for fallback
+            short_audio_threshold_secs: SHORT_AUDIO_THRESHOLD_SECS,
+        }
+    }
+}
+
+impl TimeoutConfig {
+    pub fn compute_primary_timeout(&self, duration_secs: f64) -> Duration {
+        let scaled_ms = self.primary_base_ms
+            + (duration_secs * self.primary_scale_per_sec_ms as f64).round() as u64;
+        Duration::from_millis(scaled_ms.min(self.primary_cap_ms))
+    }
+
+    pub fn compute_fallback_timeout(&self, duration_secs: f64) -> Duration {
+        let scaled_ms = self.fallback_base_ms
+            + (duration_secs * self.fallback_scale_per_sec_ms as f64).round() as u64;
+        Duration::from_millis(scaled_ms.min(self.fallback_cap_ms))
+    }
+
+    pub fn is_short_audio(&self, duration_secs: f64) -> bool {
+        duration_secs <= self.short_audio_threshold_secs
+    }
+}
 
 const DICTATION_SYSTEM_PROMPT: &str = r#"You are a specialized audio dictation engine for the user's active desktop application.
 Your task is to transcribe spoken audio and clean it up in a SINGLE PASS.
@@ -58,6 +115,7 @@ pub struct GeminiDictationClient {
     base_url: String,
     last_served_model: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     primary_unhealthy_until: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    timeout_config: TimeoutConfig,
 }
 
 impl Default for GeminiDictationClient {
@@ -76,8 +134,17 @@ impl GeminiDictationClient {
         api_key: Option<String>,
         base_url: Option<String>,
     ) -> Self {
+        Self::with_config(model, api_key, base_url, TimeoutConfig::default())
+    }
+
+    pub fn with_config(
+        model: Option<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+        timeout_config: TimeoutConfig,
+    ) -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
         let configured_model = model
@@ -90,6 +157,7 @@ impl GeminiDictationClient {
             base_url: base_url.unwrap_or_else(|| API_BASE_URL.to_string()),
             last_served_model: std::sync::Arc::new(std::sync::Mutex::new(None)),
             primary_unhealthy_until: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            timeout_config,
         }
     }
 
@@ -175,6 +243,9 @@ impl DictationClient for GeminiDictationClient {
             }
         });
 
+        let audio_duration_secs = calculate_audio_duration_secs(wav_audio_bytes);
+        let is_short_audio = self.timeout_config.is_short_audio(audio_duration_secs);
+
         let is_primary_unhealthy = self.is_primary_unhealthy();
         let fallback_model = "gemini-3-flash-preview".to_string();
 
@@ -205,14 +276,16 @@ impl DictationClient for GeminiDictationClient {
 
             let url = format!("{}/{}:generateContent", self.base_url, current_model);
             let per_attempt_timeout = if is_primary {
-                PRIMARY_PER_ATTEMPT_TIMEOUT
+                self.timeout_config
+                    .compute_primary_timeout(audio_duration_secs)
             } else {
-                FALLBACK_PER_ATTEMPT_TIMEOUT
+                self.timeout_config
+                    .compute_fallback_timeout(audio_duration_secs)
             };
 
             debug!(
-                "Sending multimodal dictation request to Gemini ({}) via header authentication (timeout: {:?})",
-                current_model, per_attempt_timeout
+                "Sending multimodal dictation request to Gemini ({}) via header authentication (audio_secs: {:.2}, timeout: {:?})",
+                current_model, audio_duration_secs, per_attempt_timeout
             );
 
             // Primary model gets at most 1 attempt before fallback!
@@ -257,14 +330,22 @@ impl DictationClient for GeminiDictationClient {
                             current_model, per_attempt_timeout
                         ));
                         if is_primary {
-                            if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
-                                *lock =
-                                    Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
+                            if is_short_audio {
+                                if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
+                                    *lock = Some(
+                                        std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN,
+                                    );
+                                }
+                                tracing::warn!(
+                                    "Primary model {} timed out on short audio ({:.2}s); caching unhealthy for 60s and falling back",
+                                    current_model, audio_duration_secs
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "Primary model {} timed out on long audio ({:.2}s); falling back WITHOUT marking unhealthy",
+                                    current_model, audio_duration_secs
+                                );
                             }
-                            tracing::warn!(
-                                "Primary model {} timed out after {:?}; caching unhealthy for 60s and falling back",
-                                current_model, per_attempt_timeout
-                            );
                             break;
                         }
                         continue;
@@ -308,7 +389,7 @@ impl DictationClient for GeminiDictationClient {
                 );
                 last_err = GeminiError::Api(format!("Status {}: {}", status, sanitized));
 
-                if is_primary && (status.as_u16() == 429 || status.as_u16() == 503) {
+                if is_primary && (status.is_server_error() || status.as_u16() == 429) {
                     if let Ok(mut lock) = self.primary_unhealthy_until.lock() {
                         *lock = Some(std::time::Instant::now() + PRIMARY_UNHEALTHY_COOLDOWN);
                     }
@@ -319,7 +400,7 @@ impl DictationClient for GeminiDictationClient {
                     break;
                 }
 
-                if status.as_u16() != 429 && status.as_u16() != 503 {
+                if !status.is_server_error() && status.as_u16() != 429 {
                     return Err(last_err);
                 }
             }
@@ -562,6 +643,329 @@ mod tests {
             "Cached request elapsed ({:?}) completed near-instantly",
             elapsed2
         );
+    }
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let mut content_len = 0;
+        let mut header_len = 0;
+
+        while let Ok(n) = socket.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if header_len == 0 {
+                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_len = pos + 4;
+                    let header_str = String::from_utf8_lossy(&buf[..header_len]);
+                    for line in header_str.lines() {
+                        let lower = line.to_ascii_lowercase();
+                        if lower.starts_with("content-length:") {
+                            if let Some((_, val)) = line.split_once(':') {
+                                content_len = val.trim().parse::<usize>().unwrap_or(0);
+                            }
+                        }
+                    }
+                }
+            }
+            if header_len > 0 && buf.len() >= header_len + content_len {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    #[tokio::test]
+    async fn test_primary_hang_timeout_fallback_and_marked_unhealthy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let primary_hit_count = Arc::new(AtomicUsize::new(0));
+        let fallback_hit_count = Arc::new(AtomicUsize::new(0));
+
+        let p_hits = Arc::clone(&primary_hit_count);
+        let f_hits = Arc::clone(&fallback_hit_count);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let p_hits = Arc::clone(&p_hits);
+                let f_hits = Arc::clone(&f_hits);
+
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+
+                    if req_str.contains("gemini-3.8-flash") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        // Primary model hangs! Sleep 1200ms (> primary timeout of 500ms)
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                        let body =
+                            r#"{"candidates":[{"content":{"parts":[{"text":"Late response"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req_str.contains("gemini-3-flash-preview") {
+                        f_hits.fetch_add(1, Ordering::SeqCst);
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Clean fallback transcription"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        // Configure client with 500ms primary timeout for predictable fast testing
+        let custom_timeouts = TimeoutConfig {
+            primary_base_ms: 500,
+            primary_scale_per_sec_ms: 0,
+            primary_cap_ms: 500,
+            fallback_base_ms: 3000,
+            fallback_scale_per_sec_ms: 0,
+            fallback_cap_ms: 3000,
+            short_audio_threshold_secs: 5.0,
+        };
+
+        let client = GeminiDictationClient::with_config(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(base_url),
+            custom_timeouts,
+        );
+
+        // 1-second audio clip (short audio: 1.0s <= 5.0s)
+        let wav_1s = vec![0u8; 44 + 32000];
+
+        let t0 = std::time::Instant::now();
+        let res = client
+            .transcribe_and_cleanup(&wav_1s, Some("notepad.exe"))
+            .await;
+        let elapsed = t0.elapsed();
+
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Clean fallback transcription");
+        assert_eq!(
+            client.last_served_model(),
+            Some("gemini-3-flash-preview".to_string())
+        );
+        assert_eq!(primary_hit_count.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_hit_count.load(Ordering::SeqCst), 1);
+
+        // Assert time-to-fallback ≈ primary timeout (500ms timeout -> fallback completes ~550ms, well under 900ms)
+        assert!(
+            elapsed >= Duration::from_millis(480),
+            "Time-to-fallback must be at least primary timeout (elapsed: {:?})",
+            elapsed
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "Time-to-fallback ≈ primary timeout (elapsed: {:?})",
+            elapsed
+        );
+
+        // Assert primary is marked unhealthy after timing out on short audio
+        assert!(
+            client.is_primary_unhealthy(),
+            "Primary model must be marked unhealthy for 60s after hanging on short audio"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_primary_hang_on_long_audio_does_not_mark_unhealthy() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                tokio::spawn(async move {
+                    let req_str = read_http_request(&mut socket).await;
+
+                    if req_str.contains("gemini-3.8-flash") {
+                        // Primary hangs
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
+                    } else if req_str.contains("gemini-3-flash-preview") {
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Long audio fallback transcription"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let custom_timeouts = TimeoutConfig {
+            primary_base_ms: 400,
+            primary_scale_per_sec_ms: 0,
+            primary_cap_ms: 400,
+            fallback_base_ms: 2000,
+            fallback_scale_per_sec_ms: 0,
+            fallback_cap_ms: 2000,
+            short_audio_threshold_secs: 5.0,
+        };
+
+        let client = GeminiDictationClient::with_config(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(base_url),
+            custom_timeouts,
+        );
+
+        // 8-second audio clip (long audio: 8.0s > 5.0s threshold)
+        let wav_8s = vec![0u8; 44 + 8 * 32000];
+
+        let res = client
+            .transcribe_and_cleanup(&wav_8s, Some("notepad.exe"))
+            .await;
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), "Long audio fallback transcription");
+
+        // Rule: slow long-audio responses do NOT mark primary unhealthy!
+        assert!(
+            !client.is_primary_unhealthy(),
+            "Slow response on long audio (>5s) must NOT mark primary unhealthy"
+        );
+    }
+
+    #[test]
+    fn test_timeout_scaling_formula() {
+        let cfg = TimeoutConfig::default();
+        // 0s audio: base timeout
+        assert_eq!(
+            cfg.compute_primary_timeout(0.0),
+            Duration::from_millis(3000)
+        );
+        assert_eq!(
+            cfg.compute_fallback_timeout(0.0),
+            Duration::from_millis(5000)
+        );
+
+        // 5s audio: base + 5 * 200ms = 4000ms
+        assert_eq!(
+            cfg.compute_primary_timeout(5.0),
+            Duration::from_millis(4000)
+        );
+        // fallback: 5000 + 5 * 300ms = 6500ms
+        assert_eq!(
+            cfg.compute_fallback_timeout(5.0),
+            Duration::from_millis(6500)
+        );
+
+        // 60s audio: capped at 12000ms and 15000ms
+        assert_eq!(
+            cfg.compute_primary_timeout(60.0),
+            Duration::from_millis(12000)
+        );
+        assert_eq!(
+            cfg.compute_fallback_timeout(60.0),
+            Duration::from_millis(15000)
+        );
+
+        // Short audio threshold
+        assert!(cfg.is_short_audio(4.9));
+        assert!(cfg.is_short_audio(5.0));
+        assert!(!cfg.is_short_audio(5.1));
+    }
+
+    #[tokio::test]
+    async fn test_both_models_fail_returns_error_and_allows_retry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let base_url = format!("http://127.0.0.1:{}", port);
+
+        let recovered = Arc::new(AtomicBool::new(false));
+        let rec_clone = Arc::clone(&recovered);
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let rec = Arc::clone(&rec_clone);
+
+                tokio::spawn(async move {
+                    let _req_str = read_http_request(&mut socket).await;
+
+                    if !rec.load(Ordering::SeqCst) {
+                        // Outage: Both models fail with 503
+                        let body = r#"{"error":{"code":503,"status":"UNAVAILABLE"}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else {
+                        // Recovered: Service returns 200 OK
+                        let body = r#"{"candidates":[{"content":{"parts":[{"text":"Successfully recovered dictation"}]}}]}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let client = GeminiDictationClient::with_base_url(
+            Some("gemini-3.8-flash".to_string()),
+            Some("fake_api_key".to_string()),
+            Some(base_url),
+        );
+
+        let wav = vec![0u8; 44 + 16000];
+        // 1. First attempt: both models fail
+        let res1 = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+        assert!(res1.is_err(), "Must return error when both models fail");
+
+        // 2. Service recovers
+        recovered.store(true, Ordering::SeqCst);
+
+        // 3. Retry with retained audio succeeds
+        let res2 = client
+            .transcribe_and_cleanup(&wav, Some("notepad.exe"))
+            .await;
+        assert!(res2.is_ok());
+        assert_eq!(res2.unwrap(), "Successfully recovered dictation");
     }
 
     #[tokio::test]

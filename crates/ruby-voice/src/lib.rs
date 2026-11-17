@@ -7,7 +7,7 @@ pub mod wav;
 use async_trait::async_trait;
 use thiserror::Error;
 
-pub use capture::{AudioSource, CpalAudioCapture, MockAudioSource};
+pub use capture::{AudioSource, CpalAudioCapture, MockAudioSource, MockAudioTracker};
 pub use vad::{frame_rms, trim_silence_vad};
 pub use wav::encode_wav_16k_mono;
 
