@@ -148,13 +148,18 @@ pub fn run() {
                 Err(_) => return,
             };
             rt.block_on(async {
-                let policy = Arc::new(ruby_policy::DefaultSecurityPolicy::new(vec![]));
+                let remote_cfg = ruby_remote::key_storage::load_remote_config();
+                let policy = Arc::new(ruby_policy::DefaultSecurityPolicy::new(
+                    remote_cfg.allowed_roots,
+                ));
                 let executor = Arc::new(ruby_actions::AllowlistedActionExecutor);
                 let confirmation_mgr = remote_adapter_bg.confirmation_manager();
-                let handler = Arc::new(ruby_remote::PolicyGatedCommandHandler::new(
+                let task_mgr = Arc::new(remote_adapter_bg.task_manager());
+                let handler = Arc::new(ruby_remote::PolicyGatedCommandHandler::with_task_manager(
                     policy,
                     executor,
                     confirmation_mgr,
+                    task_mgr,
                 ));
                 let _ = remote_adapter_bg.start_polling(handler).await;
             });

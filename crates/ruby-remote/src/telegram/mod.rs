@@ -433,6 +433,17 @@ impl TelegramAdapter {
                         Ok(action) => {
                             self.audit_logger
                                 .log_entry(sender_id, None, "yes", "confirmed");
+                            let recent = self.task_mgr.get_recent_tasks(5);
+                            if let Some(t) = recent.iter().find(|t| {
+                                t.sender_id == sender_id && t.state == TaskState::NeedsInput
+                            }) {
+                                self.task_mgr.update_task_state(
+                                    &t.id,
+                                    TaskState::Done,
+                                    Some(format!("Confirmed: {}", action.description)),
+                                    None,
+                                );
+                            }
                             let reply = format!("✅ Confirmed action: {}", action.description);
                             self.send_redacted_reply(chat_id, &reply).await?;
                         }
@@ -449,6 +460,18 @@ impl TelegramAdapter {
                 let cancelled = self.confirmation_mgr.cancel_pending();
                 self.audit_logger
                     .log_entry(sender_id, None, "no", "cancelled");
+                let recent = self.task_mgr.get_recent_tasks(5);
+                if let Some(t) = recent
+                    .iter()
+                    .find(|t| t.sender_id == sender_id && t.state == TaskState::NeedsInput)
+                {
+                    self.task_mgr.update_task_state(
+                        &t.id,
+                        TaskState::Cancelled,
+                        None,
+                        Some("User cancelled pending confirmation".into()),
+                    );
+                }
                 let reply = match cancelled {
                     Some(act) => format!("❌ Rejected action: {}", act.description),
                     None => "❌ No pending action to reject.".to_string(),

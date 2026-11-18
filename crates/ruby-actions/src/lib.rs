@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -83,6 +84,70 @@ impl AllowlistedActionExecutor {
     pub const DISALLOWED_EXTENSIONS: &'static [&'static str] = &[
         "exe", "bat", "cmd", "ps1", "vbs", "msi", "reg", "scr", "com", "pif",
     ];
+
+    pub const GIT_EXECUTION_TIMEOUT: Duration = Duration::from_secs(5);
+    pub const MAX_COMMAND_OUTPUT_BYTES: usize = 65536; // 64 KB cap
+
+    /// Builds a hardened git std::process::Command with overrides that neutralize hooks,
+    /// credential helpers, custom pagers, fsmonitor, and locks.
+    pub fn build_hardened_git_command(repo_path: &Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(repo_path)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("--no-pager")
+            .args(["-c", "core.fsmonitor="])
+            .args(["-c", "core.hooksPath="])
+            .args(["-c", "core.pager=cat"])
+            .args(["-c", "credential.helper="])
+            .args(["-c", "ssh.variant=simple"]);
+        cmd
+    }
+
+    /// Executes a command with timeout and caps output length to 64 KB.
+    pub async fn run_command_with_timeout_and_cap(
+        mut cmd: std::process::Command,
+        desc: &str,
+    ) -> Result<String, ActionError> {
+        let output = tokio::time::timeout(
+            Self::GIT_EXECUTION_TIMEOUT,
+            tokio::task::spawn_blocking(move || cmd.output()),
+        )
+        .await
+        .map_err(|_| {
+            ActionError::Failed(format!(
+                "{desc} timed out after {:?}",
+                Self::GIT_EXECUTION_TIMEOUT
+            ))
+        })?
+        .map_err(|e| ActionError::Failed(format!("Failed to join task for {desc}: {e}")))?
+        .map_err(|e| ActionError::Failed(format!("{desc} failed to launch: {e}")))?;
+
+        let mut stdout_bytes = output.stdout;
+        let is_truncated = if stdout_bytes.len() > Self::MAX_COMMAND_OUTPUT_BYTES {
+            stdout_bytes.truncate(Self::MAX_COMMAND_OUTPUT_BYTES);
+            true
+        } else {
+            false
+        };
+
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if output.status.success() {
+            let res = if stdout.trim().is_empty() {
+                format!("{desc}: completed (clean/empty output)")
+            } else if is_truncated {
+                format!("{}\n\n[... output capped at 64 KB]", stdout)
+            } else {
+                stdout.to_string()
+            };
+            Ok(res)
+        } else {
+            Err(ActionError::Failed(format!("{desc} error: {stderr}")))
+        }
+    }
 }
 
 #[async_trait]
@@ -272,7 +337,23 @@ impl ActionExecutor for AllowlistedActionExecutor {
                 if !p.exists() || !p.is_file() {
                     return Err(ActionError::Failed(format!("File not found: {path}")));
                 }
-                let meta = std::fs::metadata(p).map_err(|e| ActionError::Io(e.to_string()))?;
+                // TOCTOU defense: re-canonicalize at read time
+                let canonical = p
+                    .canonicalize()
+                    .map_err(|e| ActionError::Io(e.to_string()))?;
+
+                let lower_str = canonical.to_string_lossy().to_ascii_lowercase();
+                if lower_str.contains(".ssh")
+                    || lower_str.contains(".env")
+                    || lower_str.contains(".gemini")
+                {
+                    return Err(ActionError::Disallowed(
+                        "Access to sensitive file blocked at read time".into(),
+                    ));
+                }
+
+                let meta =
+                    std::fs::metadata(&canonical).map_err(|e| ActionError::Io(e.to_string()))?;
                 let cap = std::cmp::min(max_bytes, 10 * 1024 * 1024); // 10 MB cap
                 if meta.len() > cap as u64 {
                     return Err(ActionError::Disallowed(format!(
@@ -280,7 +361,7 @@ impl ActionExecutor for AllowlistedActionExecutor {
                         meta.len()
                     )));
                 }
-                Ok(format!("READY_FOR_UPLOAD:{path}"))
+                Ok(format!("READY_FOR_UPLOAD:{}", canonical.display()))
             }
 
             LocalAction::GitStatus(repo) => {
@@ -290,22 +371,12 @@ impl ActionExecutor for AllowlistedActionExecutor {
                         "Repository directory not found: {repo}"
                     )));
                 }
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .arg("status")
-                    .output()
-                    .map_err(|e| {
-                        ActionError::Failed(format!("git status failed to launch: {e}"))
-                    })?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    Ok(stdout.to_string())
-                } else {
-                    Err(ActionError::Failed(format!("git status error: {stderr}")))
-                }
+                let canonical_repo = p
+                    .canonicalize()
+                    .map_err(|e| ActionError::Io(e.to_string()))?;
+                let mut cmd = Self::build_hardened_git_command(&canonical_repo);
+                cmd.arg("status");
+                Self::run_command_with_timeout_and_cap(cmd, "git status").await
             }
 
             LocalAction::GitLog { repo, limit } => {
@@ -315,21 +386,13 @@ impl ActionExecutor for AllowlistedActionExecutor {
                         "Repository directory not found: {repo}"
                     )));
                 }
+                let canonical_repo = p
+                    .canonicalize()
+                    .map_err(|e| ActionError::Io(e.to_string()))?;
                 let cap_limit = std::cmp::min(limit, 50);
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(["log", "-n", &cap_limit.to_string(), "--oneline"])
-                    .output()
-                    .map_err(|e| ActionError::Failed(format!("git log failed to launch: {e}")))?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    Ok(stdout.to_string())
-                } else {
-                    Err(ActionError::Failed(format!("git log error: {stderr}")))
-                }
+                let mut cmd = Self::build_hardened_git_command(&canonical_repo);
+                cmd.args(["log", "-n", &cap_limit.to_string(), "--oneline"]);
+                Self::run_command_with_timeout_and_cap(cmd, "git log").await
             }
 
             LocalAction::GitDiffStat(repo) => {
@@ -339,74 +402,36 @@ impl ActionExecutor for AllowlistedActionExecutor {
                         "Repository directory not found: {repo}"
                     )));
                 }
-                let output = std::process::Command::new("git")
-                    .arg("-C")
-                    .arg(&repo)
-                    .args(["diff", "--stat"])
-                    .output()
-                    .map_err(|e| ActionError::Failed(format!("git diff failed to launch: {e}")))?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    Ok(if stdout.trim().is_empty() {
-                        "Working tree clean (no diff --stat)".to_string()
-                    } else {
-                        stdout.to_string()
-                    })
-                } else {
-                    Err(ActionError::Failed(format!("git diff error: {stderr}")))
-                }
+                let canonical_repo = p
+                    .canonicalize()
+                    .map_err(|e| ActionError::Io(e.to_string()))?;
+                let mut cmd = Self::build_hardened_git_command(&canonical_repo);
+                cmd.args(["diff", "--stat"]);
+                Self::run_command_with_timeout_and_cap(cmd, "git diff").await
             }
 
             LocalAction::GhPrList { repo, limit } => {
                 let cap_limit = std::cmp::min(limit, 30);
                 let mut cmd = std::process::Command::new("gh");
-                cmd.args(["pr", "list", "--limit", &cap_limit.to_string()]);
+                cmd.env("GH_PROMPT_DISABLED", "1")
+                    .env("NO_COLOR", "1")
+                    .args(["pr", "list", "--limit", &cap_limit.to_string()]);
                 if let Some(r) = repo {
                     cmd.args(["--repo", &r]);
                 }
-                let output = cmd.output().map_err(|e| {
-                    ActionError::Failed(format!("gh pr list failed to launch: {e}"))
-                })?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    Ok(if stdout.trim().is_empty() {
-                        "No open pull requests found.".to_string()
-                    } else {
-                        stdout.to_string()
-                    })
-                } else {
-                    Err(ActionError::Failed(format!("gh pr list error: {stderr}")))
-                }
+                Self::run_command_with_timeout_and_cap(cmd, "gh pr list").await
             }
 
             LocalAction::GhIssueList { repo, limit } => {
                 let cap_limit = std::cmp::min(limit, 30);
                 let mut cmd = std::process::Command::new("gh");
-                cmd.args(["issue", "list", "--limit", &cap_limit.to_string()]);
+                cmd.env("GH_PROMPT_DISABLED", "1")
+                    .env("NO_COLOR", "1")
+                    .args(["issue", "list", "--limit", &cap_limit.to_string()]);
                 if let Some(r) = repo {
                     cmd.args(["--repo", &r]);
                 }
-                let output = cmd.output().map_err(|e| {
-                    ActionError::Failed(format!("gh issue list failed to launch: {e}"))
-                })?;
-
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if output.status.success() {
-                    Ok(if stdout.trim().is_empty() {
-                        "No open issues found.".to_string()
-                    } else {
-                        stdout.to_string()
-                    })
-                } else {
-                    Err(ActionError::Failed(format!(
-                        "gh issue list error: {stderr}"
-                    )))
-                }
+                Self::run_command_with_timeout_and_cap(cmd, "gh issue list").await
             }
         }
     }
@@ -616,5 +641,82 @@ mod tests {
             })
             .await;
         assert!(big_res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_file_revalidates_canonical_path_at_read_time() {
+        let temp = tempdir().unwrap();
+        // Create a sensitive simulated .env file
+        let sensitive_path = temp.path().join(".env");
+        fs::write(&sensitive_path, "SECRET=12345").unwrap();
+
+        let executor = AllowlistedActionExecutor;
+
+        // Even if requested, SendFile detects sensitive target at read time and refuses
+        let res = executor
+            .execute(LocalAction::SendFile {
+                path: sensitive_path.to_string_lossy().to_string(),
+                max_bytes: 10 * 1024 * 1024,
+            })
+            .await;
+
+        assert_eq!(
+            res,
+            Err(ActionError::Disallowed(
+                "Access to sensitive file blocked at read time".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_fsmonitor_override_prevents_script_execution() {
+        let temp = tempdir().unwrap();
+        let repo_path = temp.path();
+
+        // 1. Initialize a minimal git repository
+        let init_out = std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo_path)
+            .output();
+        if init_out.is_err() || !init_out.unwrap().status.success() {
+            // If git CLI is not on PATH in this environment, skip test cleanly
+            return;
+        }
+
+        let marker_file = repo_path.join("fsmonitor_marker.txt");
+        if marker_file.exists() {
+            let _ = fs::remove_file(&marker_file);
+        }
+
+        // 2. Configure a malicious core.fsmonitor pointing to a python command creating the marker
+        let marker_script = format!(
+            "python -c \"import sys; open(r'{}', 'w').write('HACKED')\"",
+            marker_file.display()
+        );
+        let git_config_path = repo_path.join(".git").join("config");
+        let malicious_config = format!(
+            "\n[core]\n\tfsmonitor = \"{}\"\n",
+            marker_script.replace('\\', "\\\\")
+        );
+        let mut existing_config = fs::read_to_string(&git_config_path).unwrap_or_default();
+        existing_config.push_str(&malicious_config);
+        fs::write(&git_config_path, existing_config).unwrap();
+
+        // 3. Execute GitStatus through AllowlistedActionExecutor
+        let executor = AllowlistedActionExecutor;
+        let res = executor
+            .execute(LocalAction::GitStatus(
+                repo_path.to_string_lossy().to_string(),
+            ))
+            .await;
+
+        // Command succeeds because the hardened executor forces -c core.fsmonitor=
+        assert!(res.is_ok(), "Hardened git status should succeed: {:?}", res);
+
+        // 4. Assert marker was NEVER created
+        assert!(
+            !marker_file.exists(),
+            "CRITICAL: core.fsmonitor marker was executed! Hardening failed."
+        );
     }
 }

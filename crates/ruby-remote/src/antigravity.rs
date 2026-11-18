@@ -130,6 +130,7 @@ pub fn inspect_brain_directory(brain_dir: &Path, target_id: Option<&str>) -> Str
         out.push_str(&format!("• {} ({}) - {} artifact(s)\n", prefix, id, arts));
     }
     out.push_str("\nSend /ag <id> to inspect conversation artifacts & summary.");
+    out.push_str("\n[Runtime Notice: File inspection derives conversation UUIDs, last modified time, and artifact summaries. Live running/thinking states and unread indicators are in-process memory only and cannot be derived from disk files.]");
     out
 }
 

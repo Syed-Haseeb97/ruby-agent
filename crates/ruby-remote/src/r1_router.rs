@@ -522,4 +522,69 @@ mod tests {
         let failed_tasks = tm.get_recent_tasks(1);
         assert_eq!(failed_tasks[0].state, TaskState::Failed);
     }
+
+    #[tokio::test]
+    async fn test_needs_input_question_and_user_reply_resumes_task() {
+        let tm = Arc::new(TaskManager::new());
+        let confirmation_mgr = ConfirmationManager::new();
+        let policy = Arc::new(DefaultSecurityPolicy::new(vec![]));
+        let executor = Arc::new(AllowlistedActionExecutor);
+        let handler = PolicyGatedCommandHandler::with_task_manager(
+            policy,
+            executor,
+            confirmation_mgr.clone(),
+            Arc::clone(&tm),
+        );
+
+        let sender_id = 998877;
+        let task = tm.create_task(sender_id, "launch calc.exe");
+        tm.update_task_state(&task.id, TaskState::Running, None, None);
+
+        // 1. Dispatching an instruction requiring escalation transitions task to NeedsInput
+        let incoming = IncomingMessage {
+            update_id: 501,
+            message_id: 1001,
+            sender_id,
+            chat_id: sender_id,
+            text: "launch calc.exe".to_string(),
+            timestamp_secs: 1700000000,
+            is_private: true,
+        };
+
+        let reply = handler.handle_command(incoming).await.unwrap();
+        assert!(reply.contains("requires confirmation"));
+
+        let recent = tm.get_recent_tasks(1);
+        assert_eq!(
+            recent[0].state,
+            TaskState::NeedsInput,
+            "Task must transition to NeedsInput pending user confirmation"
+        );
+
+        // Extract 4-digit confirmation code from question/prompt
+        let code = reply
+            .split_whitespace()
+            .find(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()))
+            .expect("Must have 4-digit confirmation code");
+
+        // 2. User confirms via code; action is verified
+        let verified = confirmation_mgr.verify_code(code).unwrap();
+        assert!(verified.description.contains("calc.exe"));
+
+        // Task resumes and completes to Done
+        tm.update_task_state(
+            &task.id,
+            TaskState::Done,
+            Some(format!("Completed: {}", verified.description)),
+            None,
+        );
+
+        let final_task = tm.get_recent_tasks(1);
+        assert_eq!(
+            final_task[0].state,
+            TaskState::Done,
+            "Task must resume and reach Done"
+        );
+        assert!(final_task[0].result.as_ref().unwrap().contains("calc.exe"));
+    }
 }

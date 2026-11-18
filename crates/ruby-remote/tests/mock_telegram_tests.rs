@@ -21,6 +21,7 @@ use ruby_remote::types::TaskState;
 struct MockTelegramServer {
     pub base_url: String,
     pub sent_messages: Arc<Mutex<Vec<serde_json::Value>>>,
+    pub sent_documents: Arc<Mutex<Vec<String>>>,
     pub updates_to_serve: Arc<Mutex<Vec<serde_json::Value>>>,
     pub get_updates_calls: Arc<AtomicUsize>,
 }
@@ -36,6 +37,9 @@ impl MockTelegramServer {
         let sent_messages = Arc::new(Mutex::new(Vec::new()));
         let sent_clone = Arc::clone(&sent_messages);
 
+        let sent_documents = Arc::new(Mutex::new(Vec::new()));
+        let sent_docs_clone = Arc::clone(&sent_documents);
+
         let updates_to_serve = Arc::new(Mutex::new(Vec::new()));
         let updates_clone = Arc::clone(&updates_to_serve);
 
@@ -50,6 +54,7 @@ impl MockTelegramServer {
                 };
 
                 let sent_inner = Arc::clone(&sent_clone);
+                let sent_docs_inner = Arc::clone(&sent_docs_clone);
                 let updates_inner = Arc::clone(&updates_clone);
                 let calls_inner = Arc::clone(&calls_clone);
 
@@ -127,6 +132,19 @@ impl MockTelegramServer {
                                 );
                                 let _ = socket.write_all(http_resp.as_bytes()).await;
                                 let _ = socket.write_all(&resp_bytes).await;
+                            } else if header.contains("/sendDocument") {
+                                sent_docs_inner.lock().unwrap().push(body_str.to_string());
+                                let resp = serde_json::json!({
+                                    "ok": true,
+                                    "result": { "message_id": 102 }
+                                });
+                                let resp_bytes = serde_json::to_vec(&resp).unwrap();
+                                let http_resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    resp_bytes.len()
+                                );
+                                let _ = socket.write_all(http_resp.as_bytes()).await;
+                                let _ = socket.write_all(&resp_bytes).await;
                             } else {
                                 let resp = serde_json::json!({ "ok": true, "result": {} });
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
@@ -147,6 +165,7 @@ impl MockTelegramServer {
         Self {
             base_url,
             sent_messages,
+            sent_documents,
             updates_to_serve,
             get_updates_calls,
         }
@@ -168,6 +187,7 @@ async fn test_unknown_sender_ignored_silently() {
         enabled: true,
         keep_awake: false,
         paired_user_id: Some(12345), // Paired to 12345
+        allowed_roots: vec![],
     }));
 
     let adapter = TelegramAdapter::with_components(
@@ -223,6 +243,7 @@ async fn test_pairing_flow_success_expiry_and_wrong_code() {
         enabled: true,
         keep_awake: false,
         paired_user_id: None, // Unpaired
+        allowed_roots: vec![],
     }));
 
     let pairing_mgr = PairingManager::new();
@@ -319,6 +340,7 @@ async fn test_stale_message_dropped() {
         enabled: true,
         keep_awake: false,
         paired_user_id: Some(77777),
+        allowed_roots: vec![],
     }));
 
     let task_mgr = TaskManager::new();
@@ -397,6 +419,7 @@ async fn test_stop_cancels_all_active_tasks() {
         enabled: true,
         keep_awake: false,
         paired_user_id: Some(88888),
+        allowed_roots: vec![],
     }));
 
     let task_mgr = TaskManager::new();
@@ -454,6 +477,7 @@ async fn test_confirmation_plumbing() {
         enabled: true,
         keep_awake: false,
         paired_user_id: Some(99990),
+        allowed_roots: vec![],
     }));
 
     let confirmation_mgr = ConfirmationManager::new();
@@ -572,6 +596,7 @@ fn test_remote_off_when_no_token_or_disabled() {
         enabled: false,
         keep_awake: false,
         paired_user_id: None,
+        allowed_roots: vec![],
     };
     assert!(!config.enabled);
 
@@ -596,6 +621,7 @@ async fn test_pairing_failed_attempts_capped_at_five() {
         enabled: true,
         keep_awake: false,
         paired_user_id: None,
+        allowed_roots: vec![],
     }));
 
     let pairing_mgr = PairingManager::new();
@@ -740,7 +766,96 @@ fn test_code_generators_use_csprng() {
     );
 }
 
-// 11. Environment variable fallback for bot token
+// 11. Long command output (>4000 chars) sent as document attachment
+#[tokio::test]
+async fn test_long_output_sent_as_document() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "123:TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        paired_user_id: Some(4242),
+        ..Default::default()
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file),
+    );
+
+    // Mock handler producing output exceeding 4000 characters
+    struct BigOutputHandler;
+    #[async_trait::async_trait]
+    impl ruby_remote::traits::RemoteCommandHandler for BigOutputHandler {
+        async fn handle_command(
+            &self,
+            _message: ruby_remote::types::IncomingMessage,
+        ) -> Result<String, ruby_remote::types::RemoteError> {
+            Ok("RUBY_OUTPUT_CHUNK_".repeat(300)) // 5400 characters
+        }
+    }
+
+    adapter.set_command_handler(Arc::new(BigOutputHandler));
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 881,
+        "message": {
+            "message_id": 991,
+            "date": now_secs,
+            "from": { "id": 4242 },
+            "chat": { "id": 4242, "type": "private" },
+            "text": "run_big_task"
+        }
+    });
+
+    let res = adapter.process_update(update, now_secs).await.unwrap();
+    assert_eq!(res, Some(881));
+
+    // Wait for async sends
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify preview text message
+    let sent_msgs = mock.sent_messages.lock().unwrap();
+    assert!(
+        !sent_msgs.is_empty(),
+        "Must send preview text message via sendMessage"
+    );
+    let preview_text = sent_msgs[0]["text"].as_str().unwrap();
+    assert!(
+        preview_text
+            .contains("output exceeds 4000 characters; full text attached below as output.txt"),
+        "Preview message must notice document attachment"
+    );
+
+    // Verify sendDocument was called
+    let sent_docs = mock.sent_documents.lock().unwrap();
+    assert_eq!(
+        sent_docs.len(),
+        1,
+        "Must call sendDocument exactly once for long output"
+    );
+    assert!(
+        sent_docs[0].contains("output.txt"),
+        "Document request must specify output.txt filename"
+    );
+}
+
+// 12. Environment variable fallback for bot token
 #[test]
 fn test_bot_token_env_fallback() {
     let test_key = "TELEGRAM_BOT_TOKEN";

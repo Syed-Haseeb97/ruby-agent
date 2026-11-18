@@ -144,6 +144,12 @@ pub async fn send_chat_message(
         }
     };
 
+    // If chat was served via FreeLLMAPI, emit console notice and toast
+    if let Some(notice) = check_and_format_freellmapi_notice(&chat_resp.served_backend) {
+        let _ = app.emit("console_notice", notice);
+        let _ = app.emit("toast_notification", notice);
+    }
+
     // 3. Parse emotion response
     let (answer_text, emotion) = ruby_core::chat::parse_emotion_response(&chat_resp.text, &message);
     {
@@ -236,4 +242,31 @@ pub fn save_orb_snapshot(name: String, base64_png: String) -> Result<String, Str
     let target = out_dir.join(format!("{}.png", name));
     std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
     Ok(target.to_string_lossy().to_string())
+}
+
+/// Checks if served backend is FreeLLMAPI and formats user notification text.
+pub fn check_and_format_freellmapi_notice(served_backend: &str) -> Option<&'static str> {
+    if served_backend.to_ascii_lowercase().contains("freellmapi") {
+        Some("Chat served via FreeLLMAPI")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_served_via_freellmapi_emits_console_notice() {
+        let backend = "freellmapi-auto";
+        let notice = check_and_format_freellmapi_notice(backend);
+        assert_eq!(notice, Some("Chat served via FreeLLMAPI"));
+
+        let gemini_backend = "gemini-3.8-flash";
+        assert_eq!(check_and_format_freellmapi_notice(gemini_backend), None);
+
+        let preview_backend = "gemini-3-flash-preview";
+        assert_eq!(check_and_format_freellmapi_notice(preview_backend), None);
+    }
 }

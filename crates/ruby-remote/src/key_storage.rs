@@ -16,6 +16,8 @@ pub struct RemoteConfig {
     pub enabled: bool,
     pub keep_awake: bool,
     pub paired_user_id: Option<i64>,
+    #[serde(default)]
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -80,31 +82,44 @@ pub fn set_telegram_bot_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Loads remote configuration from disk.
+/// Loads remote configuration from disk with optional environment overrides.
 pub fn load_remote_config() -> RemoteConfig {
-    let p = config_path();
-    if p.exists() {
-        if let Ok(content) = fs::read_to_string(&p) {
-            if let Ok(cfg) = serde_json::from_str::<RemoteConfig>(&content) {
-                return cfg;
+    let mut cfg = {
+        let p = config_path();
+        if p.exists() {
+            fs::read_to_string(&p)
+                .ok()
+                .and_then(|c| serde_json::from_str::<RemoteConfig>(&c).ok())
+                .unwrap_or_default()
+        } else {
+            RemoteConfig::default()
+        }
+    };
+
+    // Environment overrides
+    if let Ok(enabled_str) = std::env::var("RUBY_REMOTE_ENABLED") {
+        cfg.enabled = enabled_str.trim() == "1" || enabled_str.trim().eq_ignore_ascii_case("true");
+    }
+
+    if let Ok(awake_str) = std::env::var("RUBY_REMOTE_KEEP_AWAKE") {
+        cfg.keep_awake = awake_str.trim() == "1" || awake_str.trim().eq_ignore_ascii_case("true");
+    }
+
+    // RUBY_ALLOWED_ROOTS env override (semicolon or comma separated)
+    if let Ok(roots_env) = std::env::var("RUBY_ALLOWED_ROOTS") {
+        let mut parsed_roots = Vec::new();
+        for root in roots_env.split(&[';', ','][..]) {
+            let trimmed = root.trim();
+            if !trimmed.is_empty() {
+                parsed_roots.push(PathBuf::from(trimmed));
             }
+        }
+        if !parsed_roots.is_empty() {
+            cfg.allowed_roots = parsed_roots;
         }
     }
 
-    // Default configuration with env overrides
-    let enabled = std::env::var("RUBY_REMOTE_ENABLED")
-        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    let keep_awake = std::env::var("RUBY_REMOTE_KEEP_AWAKE")
-        .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    RemoteConfig {
-        enabled,
-        keep_awake,
-        paired_user_id: None,
-    }
+    cfg
 }
 
 /// Saves remote configuration to disk.
@@ -137,4 +152,26 @@ pub fn save_persisted_offset(last_update_id: i64) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize remote offset: {:?}", e))?;
     fs::write(&p, content).map_err(|e| format!("Failed to write remote offset: {:?}", e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remote_config_default_allowed_roots_empty() {
+        let cfg = RemoteConfig::default();
+        assert!(cfg.allowed_roots.is_empty());
+    }
+
+    #[test]
+    fn test_remote_config_serialization_with_allowed_roots() {
+        let cfg = RemoteConfig {
+            allowed_roots: vec![PathBuf::from(r"D:\projects"), PathBuf::from(r"D:\work")],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let deserialized: RemoteConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.allowed_roots, cfg.allowed_roots);
+    }
 }
