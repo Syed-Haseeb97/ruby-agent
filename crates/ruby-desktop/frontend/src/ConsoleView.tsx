@@ -79,7 +79,77 @@ export const ConsoleView: React.FC = () => {
   } | null>(null);
   const [cuConfirmCodeInput, setCuConfirmCodeInput] = useState("");
 
-  // Milestone M5: Voice Live State
+  // Milestone M5: Background Tasks (Mode B) State
+  const [bgGoal, setBgGoal] = useState("");
+  const [bgJobs, setBgJobs] = useState<
+    Array<{
+      id: string;
+      goal: string;
+      status: string;
+      created_at: string;
+      output: string | null;
+    }>
+  >([]);
+  const [selectedJobLogs, setSelectedJobLogs] = useState<{ id: string; logs: string[] } | null>(
+    null
+  );
+
+  const fetchBgJobs = async () => {
+    try {
+      const jobs = await invoke<
+        Array<{
+          id: string;
+          goal: string;
+          status: string;
+          created_at: string;
+          output: string | null;
+        }>
+      >("list_background_jobs", { limit: 10 });
+      setBgJobs(jobs);
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleStartBgJob = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!bgGoal.trim()) return;
+    try {
+      const job = await invoke<{
+        id: string;
+        goal: string;
+        status: string;
+        created_at: string;
+        output: string | null;
+      }>("submit_background_job", { goal: bgGoal });
+      setBgGoal("");
+      setNotice(`Background task [${job.id.slice(0, 8)}] submitted.`);
+      fetchBgJobs();
+    } catch (err) {
+      setNotice(`Failed to submit background task: ${String(err)}`);
+    }
+  };
+
+  const handleCancelBgJob = async (id: string) => {
+    try {
+      await invoke("cancel_background_job", { id });
+      setNotice(`Background task [${id.slice(0, 8)}] cancelled.`);
+      fetchBgJobs();
+    } catch (err) {
+      setNotice(`Failed to cancel job: ${String(err)}`);
+    }
+  };
+
+  const handleViewLogs = async (id: string) => {
+    try {
+      const logs = await invoke<string[]>("get_background_job_logs", { id });
+      setSelectedJobLogs({ id, logs });
+    } catch (err) {
+      setNotice(`Failed to load logs: ${String(err)}`);
+    }
+  };
+
+  // Milestone V1: Voice Live State
   const [liveStatus, setLiveStatus] = useState<string>("idle");
   const [liveTranscript, setLiveTranscript] = useState<
     Array<{ text: string; is_final: boolean; timestamp_ms: number }>
@@ -263,21 +333,25 @@ export const ConsoleView: React.FC = () => {
         handleCancelSpeech();
         if (cuIsActing) {
           handleStopComputerUse();
+        } else if (liveStatus === "active" || liveStatus === "starting") {
+          handleStopLive();
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [cuIsActing]);
+  }, [cuIsActing, liveStatus]);
 
   useEffect(() => {
     fetchRemoteStatus();
     fetchCuStatus();
     fetchLiveStatus();
+    fetchBgJobs();
     const interval = setInterval(() => {
       fetchRemoteStatus();
       fetchCuStatus();
       fetchLiveStatus();
+      fetchBgJobs();
     }, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -1435,6 +1509,344 @@ export const ConsoleView: React.FC = () => {
               </div>
             )}
           </div>
+        </section>
+
+        {/* Milestone M5: Mode B Background Tasks Panel */}
+        <section
+          style={{
+            backgroundColor: "#FFFFFF",
+            border: "1px solid #C8C2B5",
+            borderRadius: "1rem",
+            padding: "1.5rem",
+            display: "flex",
+            flexDirection: "column",
+            gap: "1rem",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              borderBottom: "1px solid #C8C2B5",
+              paddingBottom: "0.75rem",
+            }}
+          >
+            <div>
+              <span
+                style={{
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "#1D6B52",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  padding: "0.25rem 0.75rem",
+                  borderRadius: "9999px",
+                  border: "1px solid #C8C2B5",
+                  backgroundColor: "#FFFFFF",
+                }}
+              >
+                ● Mode B Supervisor
+              </span>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.5rem",
+                  lineHeight: "1.1",
+                  margin: "0.5rem 0 0.25rem 0",
+                  color: "#16181D",
+                  fontWeight: 400,
+                }}
+              >
+                Background Tasks & Durable Queue
+              </h2>
+              <p
+                style={{
+                  fontFamily: "'Geist', sans-serif",
+                  fontSize: "0.8125rem",
+                  color: "#5F626A",
+                  margin: 0,
+                }}
+              >
+                Sandboxed execution environment. Zero cursor or desktop hijacking (<code>GUI_ISOLATION_REQUIRED</code> enforced). Advanced shell execution disabled by default.
+              </p>
+            </div>
+            <span
+              style={{
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                color: "#1D6B52",
+                backgroundColor: "#E3EFE8",
+                padding: "0.25rem 0.75rem",
+                borderRadius: "9999px",
+                border: "1px solid #C8C2B5",
+              }}
+            >
+              {bgJobs.filter((j) => j.status === "Running" || j.status === "Queued").length} Active / {bgJobs.length} Total
+            </span>
+          </div>
+
+          {/* Goal Submission Form */}
+          <form
+            onSubmit={handleStartBgJob}
+            style={{
+              display: "flex",
+              gap: "0.75rem",
+            }}
+          >
+            <input
+              type="text"
+              value={bgGoal}
+              onChange={(e) => setBgGoal(e.target.value)}
+              placeholder="Submit background goal (e.g. Parse reports and update index.json)..."
+              style={{
+                flex: 1,
+                border: "1px solid #C8C2B5",
+                borderRadius: "0.5rem",
+                padding: "0.5rem 0.75rem",
+                fontFamily: "'Geist', sans-serif",
+                fontSize: "0.875rem",
+                color: "#16181D",
+                backgroundColor: "#F5F3EE",
+                outline: "none",
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!bgGoal.trim()}
+              style={{
+                backgroundColor: "#16181D",
+                color: "#F5F3EE",
+                border: "none",
+                borderRadius: "9999px",
+                padding: "0.5rem 1.25rem",
+                fontFamily: "'Geist', sans-serif",
+                fontSize: "0.875rem",
+                fontWeight: 500,
+                cursor: bgGoal.trim() ? "pointer" : "not-allowed",
+                opacity: bgGoal.trim() ? 1 : 0.5,
+              }}
+            >
+              Enqueue Goal
+            </button>
+          </form>
+
+          {/* Jobs List */}
+          <div
+            style={{
+              border: "1px solid #C8C2B5",
+              borderRadius: "0.75rem",
+              backgroundColor: "#F5F3EE",
+              padding: "1rem",
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem",
+              maxHeight: "260px",
+              overflowY: "auto",
+            }}
+          >
+            {bgJobs.length === 0 ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "80px",
+                  color: "#5F626A",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "12px",
+                }}
+              >
+                No background tasks in queue. Submit a goal above or via Telegram /jobs.
+              </div>
+            ) : (
+              bgJobs.map((job) => (
+                <div
+                  key={job.id}
+                  style={{
+                    backgroundColor: "#FFFFFF",
+                    border: "1px solid #C8C2B5",
+                    borderRadius: "0.5rem",
+                    padding: "0.75rem",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <span
+                        style={{
+                          fontFamily: "'Geist Mono', monospace",
+                          fontSize: "11px",
+                          color: "#5F626A",
+                        }}
+                      >
+                        [{job.id.slice(0, 8)}]
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: "'Geist', sans-serif",
+                          fontSize: "0.875rem",
+                          fontWeight: 500,
+                          color: "#16181D",
+                        }}
+                      >
+                        {job.goal}
+                      </span>
+                    </div>
+                    {job.output && (
+                      <span
+                        style={{
+                          fontFamily: "'Geist Mono', monospace",
+                          fontSize: "11px",
+                          color: "#1D6B52",
+                        }}
+                      >
+                        Output: {job.output}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span
+                      style={{
+                        fontFamily: "'Geist Mono', monospace",
+                        fontSize: "10px",
+                        textTransform: "uppercase",
+                        padding: "0.15rem 0.5rem",
+                        borderRadius: "9999px",
+                        border: "1px solid #C8C2B5",
+                        backgroundColor:
+                          job.status === "Completed"
+                            ? "#E3EFE8"
+                            : job.status === "Running"
+                            ? "#F6ECD9"
+                            : job.status === "Failed" || job.status === "Cancelled"
+                            ? "#F8E9E4"
+                            : "#FFFFFF",
+                        color:
+                          job.status === "Completed"
+                            ? "#1D6B52"
+                            : job.status === "Running"
+                            ? "#86560D"
+                            : job.status === "Failed" || job.status === "Cancelled"
+                            ? "#B53A26"
+                            : "#16181D",
+                      }}
+                    >
+                      {job.status}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleViewLogs(job.id)}
+                      style={{
+                        backgroundColor: "#FFFFFF",
+                        border: "1px solid #C8C2B5",
+                        borderRadius: "9999px",
+                        padding: "0.2rem 0.6rem",
+                        fontFamily: "'Geist Mono', monospace",
+                        fontSize: "11px",
+                        color: "#16181D",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Logs
+                    </button>
+                    {(job.status === "Running" || job.status === "Queued") && (
+                      <button
+                        type="button"
+                        onClick={() => handleCancelBgJob(job.id)}
+                        style={{
+                          backgroundColor: "#FFFFFF",
+                          border: "1px solid #B53A26",
+                          color: "#B53A26",
+                          borderRadius: "9999px",
+                          padding: "0.2rem 0.6rem",
+                          fontFamily: "'Geist Mono', monospace",
+                          fontSize: "11px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* Log Inspector */}
+          {selectedJobLogs && (
+            <div
+              style={{
+                backgroundColor: "#F5F3EE",
+                border: "1px solid #C8C2B5",
+                borderRadius: "0.5rem",
+                padding: "0.75rem",
+                display: "flex",
+                flexDirection: "column",
+                gap: "0.5rem",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    color: "#16181D",
+                  }}
+                >
+                  Logs for [{selectedJobLogs.id.slice(0, 8)}]
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedJobLogs(null)}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "11px",
+                    color: "#5F626A",
+                    cursor: "pointer",
+                  }}
+                >
+                  Close ✕
+                </button>
+              </div>
+              <div
+                style={{
+                  maxHeight: "120px",
+                  overflowY: "auto",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  color: "#16181D",
+                  lineHeight: "1.4",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "0.2rem",
+                }}
+              >
+                {selectedJobLogs.logs.length === 0 ? (
+                  <span>No log entries recorded.</span>
+                ) : (
+                  selectedJobLogs.logs.map((l, i) => <span key={i}>{l}</span>)
+                )}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Orb Expression Preview Panel */}

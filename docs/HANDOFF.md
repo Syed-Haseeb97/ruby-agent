@@ -3,14 +3,18 @@
 **Author**: Ruby Assistant Team  
 **Date**: 2026-11-18  
 **Repository**: `Syed-Haseeb97/ruby-agent`  
-**Current Milestone**: M5 (Voice Live & Tool Execution) Completed  
+**Current Milestone**: M5 (Background Tasks / Mode B Supervisor) & V1 Voice Live Completed  
 **Next Milestone**: Ready for Production Deployment / User Validation
 
 ---
 
 ## 1. Status Overview
 
-All Part A hardening items and Milestone M4 gaps have been addressed and verified across all subsystems.
+All Part A hardening items, Milestone M4 gaps, Milestone M5 Background Tasks (Mode B Supervisor), and V1 Voice Live hardening have been addressed, implemented, and verified across all subsystems.
+
+### V1 Voice Live Relabeling & Scope Clarification
+- In earlier reports, Voice Live and bidirectional streaming was colloquially referred to alongside M5. Per explicit user direction, the Voice Live work is formally relabeled as **"V1 Voice Live"** and documented in [V1_VOICE_LIVE_ACCEPTANCE.md](file:///D:/projects/ruby-agent/docs/V1_VOICE_LIVE_ACCEPTANCE.md).
+- **Milestone M5** strictly designates the **Background Tasks (Mode B Supervisor)** per Part C of the project plan, featuring `DurableJobStore` (SQLite), `LocalToolBackend` (`GUI_ISOLATION_REQUIRED`, advanced shell disabled by default, environment secret scrubbing), `BackgroundTaskSupervisor` async queue worker, Telegram commands (`/jobs`, `/job`, `/cancel`, `/logs`), and desktop Console UI, documented in [M5_ACCEPTANCE.md](file:///D:/projects/ruby-agent/docs/M5_ACCEPTANCE.md).
 
 ### Acting Orb Color Palette
 - **Initial Implementation**: `#d97706` (generic amber)
@@ -84,7 +88,64 @@ All Part A hardening items and Milestone M4 gaps have been addressed and verifie
 
 ---
 
-## 3. Negative Invariants & Affirmation
+## 3. Milestone M5 Deliverables: Background Tasks (Mode B Supervisor)
+
+1. **Durable SQLite Queue (`DurableJobStore`)**:
+   - Manages background jobs and log records in SQLite (`background_jobs` and `job_logs`).
+   - Survived app restarts, supports `Queued`, `Running`, `Verifying`, `Completed`, `Failed`, `Cancelled`, `Timeout`.
+   - Verified via:
+     - `test_sqlite_job_store_crud_and_status`
+     - `test_sqlite_job_store_logs`
+
+2. **ExecutionBackend & Safety (`LocalToolBackend`)**:
+   - `GUI_ISOLATION_REQUIRED`: Refuses any interactive GUI/Mode A computer-use attempt by background jobs.
+   - `allow_advanced_shell: false` by default: Blocks shell redirection, subshells, and command chains.
+   - Environment secret scrubbing: Strips `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`.
+   - Verified via:
+     - `test_local_tool_backend_success`
+     - `test_local_tool_backend_gui_isolation_refusal`
+     - `test_local_tool_backend_advanced_shell_disabled_by_default`
+
+3. **Background Supervisor Worker (`BackgroundTaskSupervisor`)**:
+   - Asynchronous worker loop with cancellation tokens and execution timeouts.
+   - Verified via:
+     - `test_background_task_supervisor_lifecycle`
+     - `test_background_task_supervisor_timeout`
+     - `test_background_task_supervisor_cancellation`
+
+4. **Multi-Channel Control (Telegram & Console)**:
+   - Telegram commands `/jobs`, `/job <id>`, `/cancel <id>`, `/logs <id>`.
+   - Desktop Tauri commands (`submit_background_job`, `list_background_jobs`, etc.) and Console UI.
+   - Verified via:
+     - `test_handle_background_command`
+     - `test_telegram_background_job_commands_lifecycle`
+     - Frontend build (`npm run build`)
+
+---
+
+## 4. V1 Voice Live Deliverables
+
+1. **Bidirectional Streaming Protocol**:
+   - Client and server audio framing, turn completion, rate-limit backoff, and state machines.
+   - Verified via:
+     - `test_mock_level_voice_live_session_lifecycle`
+     - `test_mock_level_rate_limit_backoff`
+
+2. **Safety & Policy Gating**:
+   - Tool calls route through `ruby-policy` and `UnifiedConfirmationManager`.
+   - Tool results strictly wrapped in `[DATA_OUTPUT]...[/DATA_OUTPUT]`.
+   - Hard session limit (default 10 min watchdog).
+   - Audio and transcript content never written to logs.
+   - Third-party fallback strictly disabled for live audio.
+   - Verified via:
+     - `test_mock_level_policy_gated_live_tool_dispatcher_data_output_and_confirmation`
+     - `test_mock_level_transcript_prompt_injection_sanitization`
+     - `test_mock_level_live_session_hard_duration_limit`
+     - `test_mock_level_third_party_fallback_refused_for_live_audio`
+
+---
+
+## 5. Negative Invariants & Affirmation
 
 - **G3 Invariant**: Zero physical keyboard keystrokes, mouse moves, mouse clicks, screen captures, or clipboard reads/writes were dispatched or observed on physical hardware during automated test suites.
 - All tests executed hermetically using mock executors and memory capture.

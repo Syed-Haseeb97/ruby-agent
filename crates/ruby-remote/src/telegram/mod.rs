@@ -42,6 +42,7 @@ pub struct TelegramAdapter {
     last_command_time: Arc<Mutex<Option<u64>>>,
     handler: Arc<Mutex<Option<Arc<dyn RemoteCommandHandler>>>>,
     computer_use_enabled: Arc<AtomicBool>,
+    bg_supervisor: Arc<Mutex<Option<Arc<ruby_core::tasks::BackgroundTaskSupervisor>>>>,
 }
 
 impl TelegramAdapter {
@@ -78,7 +79,15 @@ impl TelegramAdapter {
             computer_use_enabled: Arc::new(AtomicBool::new(
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
+            bg_supervisor: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_background_supervisor(
+        &self,
+        supervisor: Arc<ruby_core::tasks::BackgroundTaskSupervisor>,
+    ) {
+        *self.bg_supervisor.lock().unwrap() = Some(supervisor);
     }
 
     pub fn with_confirmation_manager(
@@ -113,6 +122,7 @@ impl TelegramAdapter {
             computer_use_enabled: Arc::new(AtomicBool::new(
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
+            bg_supervisor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -138,6 +148,7 @@ impl TelegramAdapter {
             computer_use_enabled: Arc::new(AtomicBool::new(
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
+            bg_supervisor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -393,9 +404,13 @@ impl TelegramAdapter {
 
         match cmd.as_str() {
             "/help" => {
-                let help_text = "Ruby Assistant Remote (Mode A & Phase R1)\n\n\
+                let help_text = "Ruby Assistant Remote (Mode A & Mode B Background)\n\n\
                 Available Commands:\n\
                 • /do <task> - Start autonomous Mode A Computer Use desktop task\n\
+                • /jobs - List background tasks in Mode B queue\n\
+                • /job <id> - View detailed status of a background task\n\
+                • /cancel <id> - Cancel a running or queued background task\n\
+                • /logs <id> - Retrieve execution logs for a background task\n\
                 • /status - Laptop power, battery, uptime & active task status\n\
                 • /tasks - View recent tasks and current states\n\
                 • /stop - Immediately cancel all active and queued tasks\n\
@@ -413,6 +428,58 @@ impl TelegramAdapter {
                 self.audit_logger
                     .log_entry(sender_id, None, "help", "success");
                 self.send_redacted_reply(chat_id, help_text).await?;
+            }
+            "/jobs" => {
+                let reply = {
+                    let guard = self.bg_supervisor.lock().unwrap();
+                    if let Some(supervisor) = guard.as_ref() {
+                        ruby_core::tasks::handle_background_command(supervisor, "/jobs", "")
+                    } else {
+                        "Mode B Background Supervisor is not initialized.".to_string()
+                    }
+                };
+                self.audit_logger
+                    .log_entry(sender_id, None, "jobs", "success");
+                self.send_redacted_reply(chat_id, &reply).await?;
+            }
+            "/job" => {
+                let reply = {
+                    let guard = self.bg_supervisor.lock().unwrap();
+                    if let Some(supervisor) = guard.as_ref() {
+                        ruby_core::tasks::handle_background_command(supervisor, "/job", args.trim())
+                    } else {
+                        "Mode B Background Supervisor is not initialized.".to_string()
+                    }
+                };
+                self.audit_logger
+                    .log_entry(sender_id, None, "job", "query");
+                self.send_redacted_reply(chat_id, &reply).await?;
+            }
+            "/cancel" => {
+                let reply = {
+                    let guard = self.bg_supervisor.lock().unwrap();
+                    if let Some(supervisor) = guard.as_ref() {
+                        ruby_core::tasks::handle_background_command(supervisor, "/cancel", args.trim())
+                    } else {
+                        "Mode B Background Supervisor is not initialized.".to_string()
+                    }
+                };
+                self.audit_logger
+                    .log_entry(sender_id, None, "cancel", "cancelled");
+                self.send_redacted_reply(chat_id, &reply).await?;
+            }
+            "/logs" => {
+                let reply = {
+                    let guard = self.bg_supervisor.lock().unwrap();
+                    if let Some(supervisor) = guard.as_ref() {
+                        ruby_core::tasks::handle_background_command(supervisor, "/logs", args.trim())
+                    } else {
+                        "Mode B Background Supervisor is not initialized.".to_string()
+                    }
+                };
+                self.audit_logger
+                    .log_entry(sender_id, None, "logs", "query");
+                self.send_redacted_reply(chat_id, &reply).await?;
             }
             "/do" => {
                 let task_prompt = args.trim();

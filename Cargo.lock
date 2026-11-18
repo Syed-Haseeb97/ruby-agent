@@ -3338,8 +3338,10 @@ dependencies = [
  "ruby-memory",
  "ruby-platform",
  "ruby-policy",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -3371,6 +3373,7 @@ dependencies = [
  "tokio",
  "tracing",
  "ts-rs",
+ "uuid",
  "windows 0.58.0",
 ]
 

@@ -45,6 +45,7 @@ pub struct AppState {
     pub computer_use_audit: Arc<Mutex<Vec<ruby_actions::computer_use::StepRecord>>>,
     pub computer_use_active_goal: Arc<Mutex<Option<String>>>,
     pub voice_live_manager: Arc<ruby_core::voice_live::VoiceLiveManager>,
+    pub bg_supervisor: Arc<ruby_core::tasks::BackgroundTaskSupervisor>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -150,6 +151,23 @@ pub fn run() {
         None, // orb callback wired after app handle available
     ));
 
+    let ruby_paths = ruby_config::RubyPaths::resolve();
+    let jobs_db_path = ruby_paths.workspace_dir.join("jobs.db");
+    let job_store = Arc::new(
+        ruby_core::tasks::SqliteJobStore::new(&jobs_db_path)
+            .unwrap_or_else(|_| ruby_core::tasks::SqliteJobStore::new_in_memory().unwrap()),
+    );
+    let tool_backend = Arc::new(ruby_core::tasks::LocalToolBackend::new(
+        ruby_paths.workspace_dir,
+        false,
+    ));
+    let bg_supervisor = Arc::new(ruby_core::tasks::BackgroundTaskSupervisor::new(
+        job_store,
+        tool_backend,
+        300,
+    ));
+    remote_adapter.set_background_supervisor(Arc::clone(&bg_supervisor));
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Arc::clone(&orb_state_ref),
         seq_counter: Arc::clone(&seq_counter_ref),
@@ -165,6 +183,7 @@ pub fn run() {
         computer_use_audit,
         computer_use_active_goal,
         voice_live_manager,
+        bg_supervisor,
     });
 
     #[cfg(feature = "test-capture")]
@@ -190,7 +209,12 @@ pub fn run() {
         commands::stop_voice_live,
         commands::get_voice_live_status,
         commands::get_voice_live_transcript,
-        commands::push_voice_live_audio
+        commands::push_voice_live_audio,
+        commands::submit_background_job,
+        commands::list_background_jobs,
+        commands::get_background_job,
+        commands::cancel_background_job,
+        commands::get_background_job_logs
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -215,7 +239,12 @@ pub fn run() {
         commands::stop_voice_live,
         commands::get_voice_live_status,
         commands::get_voice_live_transcript,
-        commands::push_voice_live_audio
+        commands::push_voice_live_audio,
+        commands::submit_background_job,
+        commands::list_background_jobs,
+        commands::get_background_job,
+        commands::cancel_background_job,
+        commands::get_background_job_logs
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);

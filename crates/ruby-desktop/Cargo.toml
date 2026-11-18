@@ -20,6 +20,7 @@ ruby-mcp.workspace = true
 ruby-core.workspace = true
 ruby-dictation.workspace = true
 ruby-remote.workspace = true
+uuid.workspace = true
 
 tauri = { version = "2.2", features = ["tray-icon"] }
 serde.workspace = true

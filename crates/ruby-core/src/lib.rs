@@ -6,6 +6,7 @@
 //! Task states are kept strictly separate from the Orb emotion enum.
 
 pub mod chat;
+pub mod tasks;
 pub mod tts;
 pub mod voice_live;
 

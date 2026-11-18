@@ -855,6 +855,64 @@ pub async fn push_voice_live_audio(
         .map_err(|e| e.to_string())
 }
 
+// ─── Mode B: Background Tasks Commands ─────────────────────────────────────────
+
+#[tauri::command]
+pub async fn submit_background_job(
+    state: State<'_, AppState>,
+    goal: String,
+) -> Result<ruby_core::BackgroundTask, String> {
+    state
+        .bg_supervisor
+        .submit(&goal)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_background_jobs(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<ruby_core::BackgroundTask>, String> {
+    state
+        .bg_supervisor
+        .list_jobs(limit.unwrap_or(20))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_background_job(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<ruby_core::BackgroundTask>, String> {
+    let parsed_id = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state
+        .bg_supervisor
+        .get_job(parsed_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn cancel_background_job(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let parsed_id = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state
+        .bg_supervisor
+        .cancel(parsed_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_background_job_logs(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let parsed_id = uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    state
+        .bg_supervisor
+        .get_logs(parsed_id)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod voice_live_tests {
     use ruby_core::voice_live::{

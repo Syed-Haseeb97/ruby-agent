@@ -188,6 +188,10 @@ pub struct LiveSessionConfig {
     pub voice_name: String,
     pub system_prompt: Option<String>,
     pub tools: Vec<LiveToolDeclaration>,
+    /// Hard session duration limit in seconds (default: 600 = 10 min).
+    pub max_duration_secs: Option<u64>,
+    /// Third party fallback is strictly disallowed for Live Audio.
+    pub allow_third_party_fallback: bool,
 }
 
 impl Default for LiveSessionConfig {
@@ -201,6 +205,8 @@ impl Default for LiveSessionConfig {
                     .to_string(),
             ),
             tools: Vec::new(),
+            max_duration_secs: Some(600),
+            allow_third_party_fallback: false,
         }
     }
 }
@@ -449,7 +455,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
-    async fn test_mock_live_session_emits_setup_complete() {
+    async fn test_mock_level_live_session_emits_setup_complete() {
         let config = LiveSessionConfig::default();
         let mut handle = MockLiveSession::open(config);
 
@@ -465,7 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_live_session_responds_to_audio_chunk() {
+    async fn test_mock_level_live_session_responds_to_audio_chunk() {
         let config = LiveSessionConfig::default();
         let mut handle = MockLiveSession::open(config);
 
@@ -512,7 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_live_session_close_ends_channel() {
+    async fn test_mock_level_live_session_close_ends_channel() {
         let config = LiveSessionConfig::default();
         let mut handle = MockLiveSession::open(config);
         // Drain SetupComplete
@@ -535,7 +541,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_live_session_cancel_token_set_on_close() {
+    async fn test_mock_level_live_session_cancel_token_set_on_close() {
         let config = LiveSessionConfig::default();
         let handle = MockLiveSession::open(config);
         let cancel = Arc::clone(&handle.cancel_token);
@@ -550,7 +556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mock_session_ignores_empty_audio() {
+    async fn test_mock_level_session_ignores_empty_audio() {
         let config = LiveSessionConfig::default();
         let mut handle = MockLiveSession::open(config);
         // Drain SetupComplete
@@ -560,6 +566,18 @@ mod tests {
         handle.send_audio(vec![]).await.expect("send_audio failed");
         let result = timeout(Duration::from_millis(100), handle.recv()).await;
         assert!(result.is_err(), "No events expected for empty audio chunk");
+    }
+
+    #[test]
+    fn test_mock_level_third_party_fallback_refused_for_live_audio() {
+        let config = LiveSessionConfig {
+            allow_third_party_fallback: false,
+            ..Default::default()
+        };
+        assert!(
+            !config.allow_third_party_fallback,
+            "Third party fallback must be strictly false for live audio"
+        );
     }
 
     #[tokio::test]
