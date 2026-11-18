@@ -41,6 +41,7 @@ pub struct TelegramAdapter {
     running: Arc<AtomicBool>,
     last_command_time: Arc<Mutex<Option<u64>>>,
     handler: Arc<Mutex<Option<Arc<dyn RemoteCommandHandler>>>>,
+    computer_use_enabled: Arc<AtomicBool>,
 }
 
 impl TelegramAdapter {
@@ -74,6 +75,9 @@ impl TelegramAdapter {
             running,
             last_command_time,
             handler: Arc::new(Mutex::new(None)),
+            computer_use_enabled: Arc::new(AtomicBool::new(
+                ruby_config::ComputerUseConfig::load().enabled,
+            )),
         }
     }
 
@@ -106,6 +110,9 @@ impl TelegramAdapter {
             running,
             last_command_time,
             handler: Arc::new(Mutex::new(None)),
+            computer_use_enabled: Arc::new(AtomicBool::new(
+                ruby_config::ComputerUseConfig::load().enabled,
+            )),
         }
     }
 
@@ -128,7 +135,18 @@ impl TelegramAdapter {
             running: Arc::new(AtomicBool::new(false)),
             last_command_time: Arc::new(Mutex::new(None)),
             handler: Arc::new(Mutex::new(None)),
+            computer_use_enabled: Arc::new(AtomicBool::new(
+                ruby_config::ComputerUseConfig::load().enabled,
+            )),
         }
+    }
+
+    pub fn set_computer_use_enabled(&self, enabled: bool) {
+        self.computer_use_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn is_computer_use_enabled(&self) -> bool {
+        self.computer_use_enabled.load(Ordering::SeqCst)
     }
 
     pub fn set_command_handler(&self, handler: Arc<dyn RemoteCommandHandler>) {
@@ -398,7 +416,13 @@ impl TelegramAdapter {
             }
             "/do" => {
                 let task_prompt = args.trim();
-                if task_prompt.is_empty() {
+                if !self.is_computer_use_enabled() {
+                    self.send_redacted_reply(
+                        chat_id,
+                        "❌ Mode A Computer Use is disabled by default in configuration. To enable, set computer_use.enabled = true in config or export RUBY_COMPUTER_USE_ENABLED=true.",
+                    )
+                    .await?;
+                } else if task_prompt.is_empty() {
                     self.send_redacted_reply(
                         chat_id,
                         "Usage: /do <task> (e.g. /do open notepad and draft notes)",

@@ -570,6 +570,7 @@ pub struct MockComputerUseExecutor {
     pub recorded_actions: Arc<Mutex<Vec<ComputerAction>>>,
     pub held_inputs: Arc<Mutex<HeldInputs>>,
     pub canned_capture: Arc<Mutex<Option<ScreenCapture>>>,
+    pub release_calls: Arc<Mutex<usize>>,
 }
 
 impl Default for MockComputerUseExecutor {
@@ -581,6 +582,7 @@ impl Default for MockComputerUseExecutor {
             recorded_actions: Arc::new(Mutex::new(Vec::new())),
             held_inputs: Arc::new(Mutex::new(HeldInputs::default())),
             canned_capture: Arc::new(Mutex::new(None)),
+            release_calls: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -631,7 +633,8 @@ impl ComputerUseExecutor for MockComputerUseExecutor {
                     .remove(&(key.len() as u16));
             }
             ComputerAction::Drag { .. } => {
-                // Simulates drag holding and releasing left button
+                // Simulates drag holding left mouse button down
+                self.held_inputs.lock().unwrap().mouse_left_down = true;
             }
             _ => {}
         }
@@ -645,6 +648,7 @@ impl ComputerUseExecutor for MockComputerUseExecutor {
         held.mouse_right_down = false;
         held.mouse_middle_down = false;
         held.held_keys.clear();
+        *self.release_calls.lock().unwrap() += 1;
         Ok(())
     }
 

@@ -146,6 +146,63 @@ pub fn map_physical_to_normalized(
     (norm_x, norm_y)
 }
 
+/// Physical and virtual monitor geometry for multi-monitor desktop setups.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MonitorGeometry {
+    pub id: u32,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f64, // e.g. 1.0 (100%), 1.25 (125%), 1.5 (150%), 2.0 (200%)
+    pub is_primary: bool,
+}
+
+impl Default for MonitorGeometry {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            origin_x: 0,
+            origin_y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            is_primary: true,
+        }
+    }
+}
+
+/// Maps normalized [0, 1000] monitor coordinates into virtual desktop space (incorporating monitor offset).
+pub fn map_normalized_to_virtual(
+    norm_x: u32,
+    norm_y: u32,
+    monitor: &MonitorGeometry,
+) -> (i32, i32) {
+    let local_x = ((norm_x as u64 * monitor.width as u64) / 1000)
+        .min(monitor.width.saturating_sub(1) as u64) as i32;
+    let local_y = ((norm_y as u64 * monitor.height as u64) / 1000)
+        .min(monitor.height.saturating_sub(1) as u64) as i32;
+    (monitor.origin_x + local_x, monitor.origin_y + local_y)
+}
+
+/// Maps virtual desktop coordinates back into normalized [0, 1000] coordinate space for a specific monitor.
+pub fn map_virtual_to_normalized(
+    virt_x: i32,
+    virt_y: i32,
+    monitor: &MonitorGeometry,
+) -> (u32, u32) {
+    if monitor.width == 0 || monitor.height == 0 {
+        return (0, 0);
+    }
+    let local_x =
+        (virt_x - monitor.origin_x).clamp(0, monitor.width.saturating_sub(1) as i32) as u64;
+    let local_y =
+        (virt_y - monitor.origin_y).clamp(0, monitor.height.saturating_sub(1) as i32) as u64;
+    let norm_x = ((local_x * 1000) / monitor.width as u64).min(1000) as u32;
+    let norm_y = ((local_y * 1000) / monitor.height as u64).min(1000) as u32;
+    (norm_x, norm_y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +247,110 @@ mod tests {
         );
         assert_eq!(action.action_type_str(), "click");
         assert_eq!(action.coordinates(), Some((500, 250)));
+    }
+
+    #[test]
+    fn test_dpi_scaling_100_percent() {
+        let monitor = MonitorGeometry {
+            id: 0,
+            origin_x: 0,
+            origin_y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            is_primary: true,
+        };
+        assert_eq!(map_normalized_to_virtual(0, 0, &monitor), (0, 0));
+        assert_eq!(map_normalized_to_virtual(500, 500, &monitor), (960, 540));
+        assert_eq!(
+            map_normalized_to_virtual(1000, 1000, &monitor),
+            (1919, 1079)
+        );
+        assert_eq!(map_virtual_to_normalized(960, 540, &monitor), (500, 500));
+    }
+
+    #[test]
+    fn test_dpi_scaling_125_percent() {
+        let monitor = MonitorGeometry {
+            id: 0,
+            origin_x: 0,
+            origin_y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.25,
+            is_primary: true,
+        };
+        assert_eq!(map_normalized_to_virtual(500, 500, &monitor), (960, 540));
+        assert_eq!(map_virtual_to_normalized(960, 540, &monitor), (500, 500));
+    }
+
+    #[test]
+    fn test_dpi_scaling_150_percent() {
+        let monitor = MonitorGeometry {
+            id: 1,
+            origin_x: 0,
+            origin_y: 0,
+            width: 2560,
+            height: 1440,
+            scale_factor: 1.5,
+            is_primary: true,
+        };
+        assert_eq!(map_normalized_to_virtual(500, 500, &monitor), (1280, 720));
+        assert_eq!(map_virtual_to_normalized(1280, 720, &monitor), (500, 500));
+    }
+
+    #[test]
+    fn test_dpi_scaling_200_percent() {
+        let monitor = MonitorGeometry {
+            id: 0,
+            origin_x: 0,
+            origin_y: 0,
+            width: 3840,
+            height: 2160,
+            scale_factor: 2.0,
+            is_primary: true,
+        };
+        assert_eq!(map_normalized_to_virtual(500, 500, &monitor), (1920, 1080));
+        assert_eq!(map_virtual_to_normalized(1920, 1080, &monitor), (500, 500));
+    }
+
+    #[test]
+    fn test_multi_monitor_negative_origin_secondary() {
+        // Secondary monitor positioned to the left of the primary monitor
+        let secondary_monitor = MonitorGeometry {
+            id: 2,
+            origin_x: -1920,
+            origin_y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.0,
+            is_primary: false,
+        };
+
+        // Top-left of secondary monitor
+        assert_eq!(
+            map_normalized_to_virtual(0, 0, &secondary_monitor),
+            (-1920, 0)
+        );
+        // Center of secondary monitor
+        assert_eq!(
+            map_normalized_to_virtual(500, 500, &secondary_monitor),
+            (-960, 540)
+        );
+        // Bottom-right of secondary monitor
+        assert_eq!(
+            map_normalized_to_virtual(1000, 1000, &secondary_monitor),
+            (-1, 1079)
+        );
+
+        // Roundtrip mapping
+        assert_eq!(
+            map_virtual_to_normalized(-960, 540, &secondary_monitor),
+            (500, 500)
+        );
+        assert_eq!(
+            map_virtual_to_normalized(-1920, 0, &secondary_monitor),
+            (0, 0)
+        );
     }
 }

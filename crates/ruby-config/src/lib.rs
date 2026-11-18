@@ -150,3 +150,83 @@ impl SecretStore for KeyringSecretStore {
         }
     }
 }
+
+/// Configuration for Mode A Live Computer Use Operator.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ComputerUseConfig {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub allowed_monitors: Vec<u32>,
+    pub denylist: Vec<String>,
+}
+
+impl Default for ComputerUseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            dry_run: true,
+            allowed_monitors: vec![0],
+            denylist: vec![
+                "keepass".into(),
+                "1password".into(),
+                "bitwarden".into(),
+                "lastpass".into(),
+                "dashlane".into(),
+                "authenticator".into(),
+                "yubikey".into(),
+                "taskmgr".into(),
+                "regedit".into(),
+                "cmd.exe".into(),
+                "powershell.exe".into(),
+            ],
+        }
+    }
+}
+
+impl ComputerUseConfig {
+    /// Loads ComputerUseConfig from environment variables and config files, falling back to safe defaults.
+    pub fn load() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(val) = std::env::var("RUBY_COMPUTER_USE_ENABLED") {
+            cfg.enabled = val.trim().eq_ignore_ascii_case("true") || val.trim() == "1";
+        }
+        if let Ok(val) = std::env::var("RUBY_COMPUTER_USE_DRY_RUN") {
+            cfg.dry_run = val.trim().eq_ignore_ascii_case("true") || val.trim() == "1";
+        }
+        if let Ok(val) = std::env::var("RUBY_COMPUTER_USE_DENYLIST") {
+            let entries: Vec<String> = val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !entries.is_empty() {
+                cfg.denylist.extend(entries);
+            }
+        }
+        cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_computer_use_config_defaults() {
+        let cfg = ComputerUseConfig::default();
+        assert!(!cfg.enabled, "Computer use must be disabled by default");
+        assert!(cfg.dry_run, "Computer use must default to dry_run = true");
+        assert_eq!(cfg.allowed_monitors, vec![0]);
+        assert!(cfg.denylist.iter().any(|d| d == "1password"));
+        assert!(cfg.denylist.iter().any(|d| d == "bitwarden"));
+        assert!(cfg.denylist.iter().any(|d| d == "keepass"));
+    }
+
+    #[test]
+    fn test_computer_use_config_serialization_roundtrip() {
+        let cfg = ComputerUseConfig::default();
+        let json = serde_json::to_string_pretty(&cfg).unwrap();
+        let parsed: ComputerUseConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, parsed);
+    }
+}

@@ -34,6 +34,8 @@ pub const DENYLISTED_WINDOW_KEYWORDS: &[&str] = &[
     "user account control",
     "credential manager",
     "registry editor",
+    "regedit",
+    "taskmgr",
     "local group policy",
     "bank of america",
     "chase",
@@ -48,6 +50,14 @@ pub const DENYLISTED_WINDOW_KEYWORDS: &[&str] = &[
 ];
 
 pub fn is_window_denylisted(title: &str, process_name: &str) -> bool {
+    is_window_denylisted_with_custom(title, process_name, &[])
+}
+
+pub fn is_window_denylisted_with_custom(
+    title: &str,
+    process_name: &str,
+    custom_denylist: &[String],
+) -> bool {
     let lower_title = title.to_ascii_lowercase();
     let lower_proc = process_name.to_ascii_lowercase();
 
@@ -56,6 +66,16 @@ pub fn is_window_denylisted(title: &str, process_name: &str) -> bool {
             return true;
         }
     }
+
+    for custom in custom_denylist {
+        let lower_custom = custom.trim().to_ascii_lowercase();
+        if !lower_custom.is_empty()
+            && (lower_title.contains(&lower_custom) || lower_proc.contains(&lower_custom))
+        {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -214,5 +234,65 @@ mod tests {
             detect_consequential_intent("Scroll down to read paragraph"),
             None
         );
+    }
+
+    #[test]
+    fn test_denylist_matches_process_name_case_insensitive() {
+        assert!(is_window_denylisted("Editor", "Bitwarden.EXE"));
+        assert!(is_window_denylisted("Manager", "1password.exe"));
+        assert!(is_window_denylisted("Terminal", "REGEDIT.EXE"));
+    }
+
+    #[test]
+    fn test_denylist_matches_window_title_case_insensitive() {
+        assert!(is_window_denylisted(
+            "Chase Online Banking - Personal",
+            "chrome.exe"
+        ));
+        assert!(is_window_denylisted(
+            "Bank of America - Login",
+            "msedge.exe"
+        ));
+        assert!(is_window_denylisted("PayPal: Summary", "firefox.exe"));
+    }
+
+    #[test]
+    fn test_denylist_custom_user_entries_matched() {
+        let custom = vec![
+            "MyLocalCreditUnion".to_string(),
+            "custom_bank.exe".to_string(),
+        ];
+        assert!(is_window_denylisted_with_custom(
+            "Welcome to MyLocalCreditUnion Online",
+            "browser.exe",
+            &custom
+        ));
+        assert!(is_window_denylisted_with_custom(
+            "Account Overview",
+            "Custom_Bank.EXE",
+            &custom
+        ));
+        // Non-matching remains safe
+        assert!(!is_window_denylisted_with_custom(
+            "Visual Studio Code",
+            "code.exe",
+            &custom
+        ));
+    }
+
+    #[test]
+    fn test_denylist_preserves_built_in_defaults() {
+        let custom = vec!["custom_app".to_string()];
+        // Built-ins still trigger even when custom list is provided
+        assert!(is_window_denylisted_with_custom(
+            "KeePass Password Safe",
+            "keepass.exe",
+            &custom
+        ));
+        assert!(is_window_denylisted_with_custom(
+            "User Account Control",
+            "consent.exe",
+            &custom
+        ));
     }
 }

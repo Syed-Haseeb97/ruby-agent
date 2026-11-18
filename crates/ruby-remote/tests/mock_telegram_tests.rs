@@ -607,6 +607,7 @@ async fn test_telegram_do_command_and_consequential_confirmation() {
         confirmation_mgr.clone(),
         AuditLogger::new(audit_file),
     );
+    adapter.set_computer_use_enabled(true);
 
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -661,6 +662,123 @@ async fn test_telegram_do_command_and_consequential_confirmation() {
         .unwrap()
         .contains("Consequential action detected")
         && s["text"].as_str().unwrap().contains("Type /yes")));
+}
+
+#[tokio::test]
+async fn test_telegram_do_refuses_when_computer_use_disabled() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(88888),
+        allowed_roots: vec![],
+    }));
+
+    let task_mgr = TaskManager::new();
+    let confirmation_mgr = ConfirmationManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        task_mgr.clone(),
+        confirmation_mgr.clone(),
+        AuditLogger::new(audit_file),
+    );
+    adapter.set_computer_use_enabled(false);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 35,
+        "message": {
+            "message_id": 55,
+            "from": { "id": 88888 },
+            "chat": { "id": 88888, "type": "private" },
+            "date": now_secs,
+            "text": "/do browse web and search notes"
+        }
+    });
+
+    adapter.process_update(update, now_secs).await.unwrap();
+
+    let sent = mock.sent_messages.lock().unwrap();
+    assert!(sent.iter().any(|s| s["text"]
+        .as_str()
+        .unwrap()
+        .contains("Mode A Computer Use is disabled by default in configuration")));
+}
+
+#[tokio::test]
+async fn test_m4_consequential_confirmation_uses_unified_confirmation_manager() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(77777),
+        allowed_roots: vec![],
+    }));
+
+    let task_mgr = TaskManager::new();
+    let confirmation_mgr = ConfirmationManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        task_mgr.clone(),
+        confirmation_mgr.clone(),
+        AuditLogger::new(audit_file),
+    );
+    adapter.set_computer_use_enabled(true);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Trigger consequential action
+    let update = serde_json::json!({
+        "update_id": 36,
+        "message": {
+            "message_id": 56,
+            "from": { "id": 77777 },
+            "chat": { "id": 77777, "type": "private" },
+            "date": now_secs,
+            "text": "/do delete file production_backup.zip"
+        }
+    });
+    adapter.process_update(update, now_secs).await.unwrap();
+
+    // Verify pending confirmation in UnifiedConfirmationManager
+    let pending = confirmation_mgr
+        .get_active_pending()
+        .expect("Pending action must exist in UnifiedConfirmationManager");
+    assert!(pending.description.contains("production_backup.zip"));
+
+    // 5 wrong attempts invalidate action
+    for _ in 0..5 {
+        let _ = confirmation_mgr.verify_code("0000");
+    }
+    assert!(
+        confirmation_mgr.get_active_pending().is_none(),
+        "Action must be dropped after 5 failed attempts"
+    );
 }
 
 // 7. Token never in logs and redacted

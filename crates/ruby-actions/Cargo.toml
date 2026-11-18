@@ -17,6 +17,8 @@ async-trait.workspace = true
 open = "5.3"
 chrono.workspace = true
 tracing.workspace = true
+base64 = "0.22"
+reqwest = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 windows = { workspace = true, features = [
     "Win32_Foundation",

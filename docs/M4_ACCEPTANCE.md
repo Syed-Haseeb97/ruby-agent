@@ -53,19 +53,35 @@ Milestone M4 delivers Ruby's **Mode A Live Computer Use** engine: a native Windo
 | **B1.2** | Action serialization & deserialization | **VERIFIED** | `ruby-actions::computer_use::action::tests::test_action_serialization_and_deserialization` |
 | **B1.3** | SendInput mouse & keyboard dispatch | `compiles-only` | Native Win32 SendInput implemented in `WindowsComputerUseExecutor` (physical cursor movement unobserved) |
 | **B1.4** | In-memory GDI capture + `WDA_EXCLUDEFROMCAPTURE` | `compiles-only` | Implemented in `ruby-desktop::setup` and `WindowsComputerUseExecutor` |
+| **B1.5** | Multi-monitor negative origin secondary monitor geometry | **VERIFIED** | `ruby-actions::computer_use::action::tests::test_multi_monitor_negative_origin_secondary` |
+| **B1.6** | DPI scaling coordinate spaces (100%, 125%, 150%, 200%) | **VERIFIED** | `ruby-actions::computer_use::action::tests::test_dpi_scaling_100_percent` .. `test_dpi_scaling_200_percent` |
 | **B2.1** | Agent loop success path with mock model & screen | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_agent_loop_success_path` |
 | **B2.2** | Kill switch abort while model reasoning hangs | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_kill_switch_aborts_hanging_model_call` |
-| **B2.3** | Loop limits: stuck action repetition detector (3x) | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_stuck_detector_aborts_loop` |
-| **B2.4** | Loop limits: max step limit exceeded | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_max_steps_limit_exceeded` |
-| **B2.5** | Loop limits: wall-clock timeout exceeded | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_wall_clock_timeout_exceeded` |
-| **B2.6** | Dry-run mode logging without input dispatch | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_dry_run_mode_records_without_executing` |
+| **B2.3** | Kill switch during drag releases mouse button | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_kill_switch_during_drag_releases_mouse` |
+| **B2.4** | Kill switch during held key releases virtual key | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_kill_switch_during_held_key_releases_key` |
+| **B2.5** | Loop limits: stuck action repetition detector (3x) | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_stuck_detector_aborts_loop` |
+| **B2.6** | Loop limits: max step limit exceeded | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_max_steps_limit_exceeded` |
+| **B2.7** | Loop limits: wall-clock timeout exceeded | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_wall_clock_timeout_exceeded` |
+| **B2.8** | Dry-run mode logging without input dispatch | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_dry_run_mode_records_without_executing` |
 | **B3.1** | Window denylist (password managers, banking, UAC) | **VERIFIED** | `ruby-policy::computer_policy::tests::test_denylist_catches_password_managers_and_banking` |
-| **B3.2** | Secret typing refusal (Google keys, OpenAI, tokens) | **VERIFIED** | `ruby-policy::computer_policy::tests::test_secret_typing_refusal` & `test_secret_typing_refused` |
-| **B3.3** | Screen data passive prompt injection containment | **VERIFIED** | `ruby-policy::computer_policy::tests::test_prompt_injection_passive_data_framing` |
-| **B3.4** | Consequential action detection & gating | **VERIFIED** | `ruby-policy::computer_policy::tests::test_consequential_action_detection` |
+| **B3.2** | Denylist process name matching (case-insensitive) | **VERIFIED** | `ruby-policy::computer_policy::tests::test_denylist_matches_process_name_case_insensitive` |
+| **B3.3** | Denylist window title matching (case-insensitive) | **VERIFIED** | `ruby-policy::computer_policy::tests::test_denylist_matches_window_title_case_insensitive` |
+| **B3.4** | Denylist user-customizable entries and defaults preservation | **VERIFIED** | `ruby-policy::computer_policy::tests::test_denylist_custom_user_entries_matched` & `test_denylist_preserves_built_in_defaults` |
+| **B3.5** | Secret typing refusal (Google keys, OpenAI, tokens) | **VERIFIED** | `ruby-policy::computer_policy::tests::test_secret_typing_refusal` & `test_secret_typing_refused` |
+| **B3.6** | Password-field guardrail stops typing | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_password_field_detected_refuses_typing` |
+| **B3.7** | Unverifiable browser field fails closed & refuses typing | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_unverifiable_field_in_browser_refuses_typing` |
+| **B3.8** | Session locked stop and report | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_session_locked_stops_agent_loop` |
+| **B3.9** | Foreground elevated or secure desktop stop and report | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_elevated_foreground_or_secure_desktop_stops_agent_loop` |
+| **B3.10** | Audit log hygiene (no typed text, no screenshots) | **VERIFIED** | `ruby-actions::computer_use::agent_loop::tests::test_audit_log_hygiene_never_records_typed_text_or_screenshots` |
+| **B3.11** | Screen data passive prompt injection containment | **VERIFIED** | `ruby-policy::computer_policy::tests::test_prompt_injection_passive_data_framing` |
+| **B3.12** | Consequential action detection & gating | **VERIFIED** | `ruby-policy::computer_policy::tests::test_consequential_action_detection` |
 | **B4.1** | Console Computer Use panel & live step log | `compiles-only` | Implemented in `ConsoleView.tsx`, verified via `npm run build` (vite v6.4.6) |
-| **B4.2** | Acting Orb state visual rendering | `UNVERIFIED` | Added to `LiquidOrbCanvas.tsx`; marked UNVERIFIED for SSIM (PyQt commit `7bc2c3a` had no Acting state) |
+| **B4.2** | Acting Orb state visual rendering (warm bronze amber `#86560D`) | `UNVERIFIED` | Added to `LiquidOrbCanvas.tsx`; marked `needs Haseeb approval` |
 | **B5.1** | Telegram `/do <task>` command | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_telegram_do_command_and_consequential_confirmation` |
-| **B5.2** | Telegram `/stop` cancel all active tasks | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_stop_cancels_all_active_tasks` |
-| **B5.3** | Telegram `/yes <code>` confirmation plumbing | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_confirmation_plumbing` |
-| **B6.1** | Manual testing protocol documentation | **VERIFIED** | Documented in `docs/M4_MANUAL_TESTING.md` |
+| **B5.2** | Telegram `/do` refused when disabled in config | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_telegram_do_refuses_when_computer_use_disabled` |
+| **B5.3** | Telegram `/stop` cancel all active tasks & release inputs | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_stop_cancels_all_active_tasks` |
+| **B5.4** | M4 consequential confirmation with UnifiedConfirmationManager (120s TTL, 5-attempt cap) | **VERIFIED** | `ruby-remote::tests::mock_telegram_tests::test_m4_consequential_confirmation_uses_unified_confirmation_manager` |
+| **B6.1** | Gemini vision primary -> fallback chain | **VERIFIED** | `ruby-actions::computer_use::gemini_vision::tests::test_parse_action_json_clean_and_fenced` |
+| **B6.2** | FreeLLMAPI third-party fallback blocked without explicit screenshot confirmation | **VERIFIED** | `ruby-actions::computer_use::gemini_vision::tests::test_third_party_fallback_blocked_without_explicit_confirmation` |
+| **B6.3** | FreeLLMAPI third-party fallback refused when `allow_third_party_fallback = false` | **VERIFIED** | `ruby-actions::computer_use::gemini_vision::tests::test_third_party_fallback_refused_when_allow_fallback_is_false` |
+| **B7.1** | Manual testing protocol documentation | **VERIFIED** | Documented in `docs/M4_MANUAL_TESTING.md` |

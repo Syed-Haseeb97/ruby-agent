@@ -12,9 +12,105 @@ use tracing::{info, warn};
 use super::action::ComputerAction;
 use super::executor::{ComputerUseExecutor, ScreenCapture};
 use ruby_policy::computer_policy::{
-    check_secret_typing, detect_consequential_intent, is_window_denylisted,
+    check_secret_typing, detect_consequential_intent, is_window_denylisted_with_custom,
 };
 use ruby_policy::ConfirmationBroker;
+
+/// Helper to detect if active window belongs to a web browser.
+pub fn is_browser_target(proc_name: &str, win_title: &str) -> bool {
+    let lower_proc = proc_name.to_ascii_lowercase();
+    let lower_title = win_title.to_ascii_lowercase();
+    let browser_keywords = [
+        "chrome", "msedge", "firefox", "brave", "opera", "vivaldi", "arc",
+    ];
+    for b in browser_keywords {
+        if lower_proc.contains(b) || lower_title.contains(b) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Abstract security and elevation inspector for the active desktop session.
+#[async_trait]
+pub trait PlatformSecurityInspector: Send + Sync {
+    async fn is_session_locked(&self) -> bool;
+    async fn is_foreground_elevated_or_secure_desktop(&self) -> bool;
+    async fn check_type_guardrails(&self, is_browser: bool) -> Result<(), String>;
+}
+
+/// Mock Platform Security Inspector for offline and hermetic testing.
+#[derive(Default, Clone)]
+pub struct MockPlatformSecurityInspector {
+    pub session_locked: bool,
+    pub foreground_elevated: bool,
+    pub password_field_detected: bool,
+    pub unverifiable_browser_field: bool,
+}
+
+#[async_trait]
+impl PlatformSecurityInspector for MockPlatformSecurityInspector {
+    async fn is_session_locked(&self) -> bool {
+        self.session_locked
+    }
+
+    async fn is_foreground_elevated_or_secure_desktop(&self) -> bool {
+        self.foreground_elevated
+    }
+
+    async fn check_type_guardrails(&self, is_browser: bool) -> Result<(), String> {
+        if self.password_field_detected {
+            return Err("Focused control is a password field; typing aborted".into());
+        }
+        if is_browser && self.unverifiable_browser_field {
+            return Err("Unverifiable browser input field: failing closed".into());
+        }
+        Ok(())
+    }
+}
+
+/// Native Windows implementation of PlatformSecurityInspector.
+#[cfg(windows)]
+pub struct WindowsPlatformSecurityInspector;
+
+#[cfg(windows)]
+#[async_trait]
+impl PlatformSecurityInspector for WindowsPlatformSecurityInspector {
+    async fn is_session_locked(&self) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            hwnd.0.is_null()
+        }
+    }
+
+    async fn is_foreground_elevated_or_secure_desktop(&self) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return false;
+            }
+            ruby_platform::elevation_check::is_target_window_elevated(hwnd).unwrap_or(false)
+                && !ruby_platform::elevation_check::is_current_process_elevated()
+        }
+    }
+
+    async fn check_type_guardrails(&self, is_browser: bool) -> Result<(), String> {
+        if is_browser {
+            match ruby_platform::elevation_check::is_focused_element_password_uia() {
+                Ok(true) => Err("Focused control is a password field; typing aborted".into()),
+                Ok(false) => Ok(()),
+                Err(e) => Err(format!(
+                    "Unverifiable browser input field; failing closed: {e}"
+                )),
+            }
+        } else {
+            ruby_platform::elevation_check::check_password_guardrails()
+                .map_err(|e| format!("Password guardrail triggered: {e}"))
+        }
+    }
+}
 
 /// Async and atomic kill switch cancellation token.
 #[derive(Clone, Default)]
@@ -78,6 +174,7 @@ pub struct ComputerUseAgentConfig {
     pub wall_clock_timeout: Duration,
     pub per_action_timeout: Duration,
     pub dry_run: bool,
+    pub denylist: Vec<String>,
 }
 
 impl Default for ComputerUseAgentConfig {
@@ -87,6 +184,7 @@ impl Default for ComputerUseAgentConfig {
             wall_clock_timeout: Duration::from_secs(300),
             per_action_timeout: Duration::from_secs(10),
             dry_run: false,
+            denylist: Vec::new(),
         }
     }
 }
@@ -97,7 +195,9 @@ pub struct ComputerUseAgentLoop {
     pub model_client: Arc<dyn ComputerUseModelClient>,
     pub confirmation_broker: Option<Arc<dyn ConfirmationBroker>>,
     pub cancellation_token: KillSwitchToken,
+    pub security_inspector: Arc<dyn PlatformSecurityInspector>,
     pub audit_log: Arc<std::sync::Mutex<Vec<StepRecord>>>,
+    pub window_override: Arc<std::sync::Mutex<Option<(String, String)>>>,
 }
 
 impl ComputerUseAgentLoop {
@@ -114,8 +214,33 @@ impl ComputerUseAgentLoop {
             model_client,
             confirmation_broker,
             cancellation_token,
+            security_inspector: Arc::new(MockPlatformSecurityInspector::default()),
             audit_log: Arc::new(std::sync::Mutex::new(Vec::new())),
+            window_override: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    #[cfg(windows)]
+    pub fn with_windows_inspector(mut self) -> Self {
+        self.security_inspector = Arc::new(WindowsPlatformSecurityInspector);
+        self
+    }
+
+    pub fn with_security_inspector(
+        mut self,
+        inspector: Arc<dyn PlatformSecurityInspector>,
+    ) -> Self {
+        self.security_inspector = inspector;
+        self
+    }
+
+    pub fn with_window_override(
+        self,
+        title: impl Into<String>,
+        proc_name: impl Into<String>,
+    ) -> Self {
+        *self.window_override.lock().unwrap() = Some((title.into(), proc_name.into()));
+        self
     }
 
     pub fn get_audit_log(&self) -> Vec<StepRecord> {
@@ -123,7 +248,10 @@ impl ComputerUseAgentLoop {
     }
 
     /// Helper to get current foreground window title and process name safely.
-    fn inspect_active_window() -> (String, String) {
+    fn inspect_active_window(&self) -> (String, String) {
+        if let Some(pair) = self.window_override.lock().unwrap().clone() {
+            return pair;
+        }
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::HWND;
@@ -136,7 +264,9 @@ impl ComputerUseAgentLoop {
                 let mut title_buf = [0u16; 512];
                 let len = GetWindowTextW(hwnd, &mut title_buf);
                 let title = String::from_utf16_lossy(&title_buf[..len as usize]);
-                (title, "active_process.exe".into())
+                let proc_name = ruby_platform::elevation_check::get_foreground_process_name()
+                    .unwrap_or_else(|| "active_process.exe".into());
+                (title, proc_name)
             }
         }
         #[cfg(not(windows))]
@@ -170,9 +300,28 @@ impl ComputerUseAgentLoop {
                 return TaskStatus::Failed("Wall-clock timeout exceeded".into());
             }
 
-            // 3. Inspect Active Window & Denylist Gate
-            let (win_title, proc_name) = Self::inspect_active_window();
-            if is_window_denylisted(&win_title, &proc_name) {
+            // 3. Platform Security Checks: Session Lock & Elevation / Secure Desktop
+            if self.security_inspector.is_session_locked().await {
+                warn!("Windows user session is locked. Halting Computer Use.");
+                let _ = self.executor.release_all_held_inputs().await;
+                return TaskStatus::Failed("Session is locked".into());
+            }
+
+            if self
+                .security_inspector
+                .is_foreground_elevated_or_secure_desktop()
+                .await
+            {
+                warn!("Foreground window is elevated or secure desktop/UAC is active. Halting.");
+                let _ = self.executor.release_all_held_inputs().await;
+                return TaskStatus::Failed(
+                    "Target window is elevated or secure desktop active".into(),
+                );
+            }
+
+            // 4. Inspect Active Window & Denylist Gate
+            let (win_title, proc_name) = self.inspect_active_window();
+            if is_window_denylisted_with_custom(&win_title, &proc_name, &self.config.denylist) {
                 warn!(
                     "Active window \"{}\" ({}) is in the Security Denylist! Halting.",
                     win_title, proc_name
@@ -231,6 +380,20 @@ impl ComputerUseAgentLoop {
                         warn!("Secret typing blocked by policy: {:?}", e);
                         let _ = self.executor.release_all_held_inputs().await;
                         return TaskStatus::Failed("Policy blocked secret typing".into());
+                    }
+
+                    // Password guardrail & browser verification check
+                    let is_browser = is_browser_target(&proc_name, &win_title);
+                    if let Err(e) = self
+                        .security_inspector
+                        .check_type_guardrails(is_browser)
+                        .await
+                    {
+                        warn!("Type guardrail prevented typing: {}", e);
+                        let _ = self.executor.release_all_held_inputs().await;
+                        return TaskStatus::Failed(format!(
+                            "Security policy prevented typing: {e}"
+                        ));
                     }
                 }
                 ComputerAction::Finish { result } => {
@@ -575,5 +738,239 @@ mod tests {
 
         let res = agent.run("Timeout test").await;
         assert!(matches!(res, TaskStatus::Failed(msg) if msg.contains("timeout exceeded")));
+    }
+
+    #[tokio::test]
+    async fn test_kill_switch_during_drag_releases_mouse() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::Drag {
+                start_x: 100,
+                start_y: 100,
+                end_x: 600,
+                end_y: 600,
+            },
+            ComputerAction::Move { x: 50, y: 50 },
+        ]));
+
+        let cancel_token = KillSwitchToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        );
+
+        // Cancel after step 1
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel_token_clone.cancel();
+        });
+
+        let res = agent.run("Drag task").await;
+        assert_eq!(res, TaskStatus::Cancelled);
+        // Held mouse must be cleared and release_all_held_inputs called
+        assert!(!executor.held_inputs.lock().unwrap().mouse_left_down);
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_kill_switch_during_held_key_releases_key() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::KeyDown {
+                key: "Shift".into(),
+            },
+            ComputerAction::Move { x: 10, y: 10 },
+        ]));
+
+        let cancel_token = KillSwitchToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        );
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            cancel_token_clone.cancel();
+        });
+
+        let res = agent.run("Key down task").await;
+        assert_eq!(res, TaskStatus::Cancelled);
+        // Held keys must be cleared and release_all_held_inputs called
+        assert!(executor.held_inputs.lock().unwrap().held_keys.is_empty());
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_session_locked_stops_agent_loop() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::Click {
+                x: 100,
+                y: 100,
+                button: MouseButton::Left,
+            },
+        ]));
+
+        let inspector = Arc::new(MockPlatformSecurityInspector {
+            session_locked: true,
+            ..Default::default()
+        });
+
+        let cancel_token = KillSwitchToken::new();
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        )
+        .with_security_inspector(inspector);
+
+        let res = agent.run("Locked session task").await;
+        assert_eq!(res, TaskStatus::Failed("Session is locked".into()));
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_elevated_foreground_or_secure_desktop_stops_agent_loop() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::Click {
+                x: 100,
+                y: 100,
+                button: MouseButton::Left,
+            },
+        ]));
+
+        let inspector = Arc::new(MockPlatformSecurityInspector {
+            foreground_elevated: true,
+            ..Default::default()
+        });
+
+        let cancel_token = KillSwitchToken::new();
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        )
+        .with_security_inspector(inspector);
+
+        let res = agent.run("Elevated foreground task").await;
+        assert_eq!(
+            res,
+            TaskStatus::Failed("Target window is elevated or secure desktop active".into())
+        );
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_password_field_detected_refuses_typing() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::TypeText {
+                text: "ordinary_user_input".into(),
+                press_enter: false,
+            },
+        ]));
+
+        let inspector = Arc::new(MockPlatformSecurityInspector {
+            password_field_detected: true,
+            ..Default::default()
+        });
+
+        let cancel_token = KillSwitchToken::new();
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        )
+        .with_security_inspector(inspector);
+
+        let res = agent.run("Password field task").await;
+        assert!(matches!(res, TaskStatus::Failed(msg) if msg.contains("password field")));
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_unverifiable_field_in_browser_refuses_typing() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::TypeText {
+                text: "browser_search_term".into(),
+                press_enter: false,
+            },
+        ]));
+
+        let inspector = Arc::new(MockPlatformSecurityInspector {
+            unverifiable_browser_field: true,
+            ..Default::default()
+        });
+
+        let cancel_token = KillSwitchToken::new();
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        )
+        .with_security_inspector(inspector)
+        .with_window_override("Google Chrome - New Tab", "chrome.exe");
+
+        let res = agent.run("Browser search task").await;
+        assert!(matches!(res, TaskStatus::Failed(msg) if msg.contains("Unverifiable browser")));
+        assert!(*executor.release_calls.lock().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_audit_log_hygiene_never_records_typed_text_or_screenshots() {
+        let executor = Arc::new(MockComputerUseExecutor::default());
+        let sensitive_input = "sensitive_personal_data_xyz987";
+        let model = Arc::new(MockComputerUseModelClient::new(vec![
+            ComputerAction::TypeText {
+                text: sensitive_input.into(),
+                press_enter: true,
+            },
+            ComputerAction::Finish {
+                result: Some("Done".into()),
+            },
+        ]));
+
+        let cancel_token = KillSwitchToken::new();
+        let agent = ComputerUseAgentLoop::new(
+            ComputerUseAgentConfig::default(),
+            Arc::clone(&executor) as Arc<dyn ComputerUseExecutor>,
+            Arc::clone(&model) as Arc<dyn ComputerUseModelClient>,
+            None,
+            cancel_token,
+        )
+        .with_security_inspector(Arc::new(MockPlatformSecurityInspector::default()));
+
+        let res = agent.run("Audit hygiene goal").await;
+        assert_eq!(res, TaskStatus::Completed(Some("Done".into())));
+
+        let logs = agent.get_audit_log();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].action_type, "type_text");
+
+        // Serialize audit log to JSON string and verify absence of sensitive text and screenshot bytes
+        let json_str = serde_json::to_string(&logs).unwrap();
+        assert!(!json_str.contains(sensitive_input));
+        assert!(!json_str.contains("jpeg_bytes"));
+        assert!(!json_str.contains("data:image"));
     }
 }
