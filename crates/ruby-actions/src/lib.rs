@@ -2,6 +2,8 @@
 //! Executes file basics, application launch/close, Windows system settings,
 //! screen clicks, startup registration, and chained multi-step commands.
 
+pub mod computer_use;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;

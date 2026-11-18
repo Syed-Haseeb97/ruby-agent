@@ -1,4 +1,4 @@
-export type OperationalState = "Idle" | "Listening" | "Thinking" | "Speaking" | "Error";
+export type OperationalState = "Idle" | "Listening" | "Thinking" | "Speaking" | "Acting" | "Error";
 
 export type Emotion =
   | "Neutral"

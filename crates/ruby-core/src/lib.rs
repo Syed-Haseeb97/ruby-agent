@@ -34,6 +34,7 @@ pub enum OperationalState {
     Listening,
     Thinking,
     Speaking,
+    Acting,
     Error,
 }
 
@@ -136,7 +137,9 @@ impl OrbVisualState {
                 // If an emotional expression is actively overriding, black core is turned off
                 matches!(self.emotion, Emotion::Neutral)
             }
-            OperationalState::Thinking | OperationalState::Error => false,
+            OperationalState::Thinking | OperationalState::Error | OperationalState::Acting => {
+                false
+            }
         }
     }
 }

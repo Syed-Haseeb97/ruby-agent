@@ -7,6 +7,7 @@ const OPERATIONAL_STATES: OperationalState[] = [
   "Listening",
   "Thinking",
   "Speaking",
+  "Acting",
   "Error",
 ];
 

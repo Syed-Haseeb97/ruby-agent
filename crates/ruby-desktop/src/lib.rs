@@ -41,6 +41,9 @@ pub struct AppState {
     pub tts_playback: Arc<TtsPlaybackController>,
     pub tool_manager: Arc<ruby_mcp::PolicyGatedToolManager>,
     pub memory_store: Arc<dyn ruby_memory::MemoryStore>,
+    pub computer_use_kill_switch: Arc<ruby_actions::computer_use::KillSwitchToken>,
+    pub computer_use_audit: Arc<Mutex<Vec<ruby_actions::computer_use::StepRecord>>>,
+    pub computer_use_active_goal: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -134,6 +137,10 @@ pub fn run() {
             Err(_) => Arc::new(ruby_memory::SqliteMemoryStore::open_in_memory().unwrap()),
         };
 
+    let computer_use_kill_switch = Arc::new(ruby_actions::computer_use::KillSwitchToken::new());
+    let computer_use_audit = Arc::new(Mutex::new(Vec::new()));
+    let computer_use_active_goal = Arc::new(Mutex::new(None));
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Arc::clone(&orb_state_ref),
         seq_counter: Arc::clone(&seq_counter_ref),
@@ -145,6 +152,9 @@ pub fn run() {
         tts_playback,
         tool_manager,
         memory_store,
+        computer_use_kill_switch,
+        computer_use_audit,
+        computer_use_active_goal,
     });
 
     #[cfg(feature = "test-capture")]
@@ -162,7 +172,10 @@ pub fn run() {
         commands::add_memory,
         commands::search_memories,
         commands::delete_memory,
-        commands::wipe_all_memories
+        commands::wipe_all_memories,
+        commands::start_computer_use_task,
+        commands::stop_computer_use_task,
+        commands::get_computer_use_status
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -179,7 +192,10 @@ pub fn run() {
         commands::add_memory,
         commands::search_memories,
         commands::delete_memory,
-        commands::wipe_all_memories
+        commands::wipe_all_memories,
+        commands::start_computer_use_task,
+        commands::stop_computer_use_task,
+        commands::get_computer_use_status
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);
@@ -216,6 +232,14 @@ pub fn run() {
         .setup(|app| {
             if let Some(orb_win) = app.get_webview_window("orb") {
                 configure_orb_window_win32(&orb_win.as_ref().window());
+            }
+            if let Some(console_win) = app.get_webview_window("console").or_else(|| app.get_webview_window("main")) {
+                if let Ok(hwnd_val) = console_win.as_ref().window().hwnd() {
+                    let hwnd = HWND(hwnd_val.0 as *mut _);
+                    unsafe {
+                        let _ = SetWindowDisplayAffinity(hwnd, WINDOW_DISPLAY_AFFINITY(0x00000011));
+                    }
+                }
             }
 
             let app_handle = app.handle().clone();

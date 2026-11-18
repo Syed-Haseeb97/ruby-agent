@@ -375,8 +375,9 @@ impl TelegramAdapter {
 
         match cmd.as_str() {
             "/help" => {
-                let help_text = "Ruby Assistant Remote (Phase R1 Read-Only)\n\n\
+                let help_text = "Ruby Assistant Remote (Mode A & Phase R1)\n\n\
                 Available Commands:\n\
+                • /do <task> - Start autonomous Mode A Computer Use desktop task\n\
                 • /status - Laptop power, battery, uptime & active task status\n\
                 • /tasks - View recent tasks and current states\n\
                 • /stop - Immediately cancel all active and queued tasks\n\
@@ -394,6 +395,53 @@ impl TelegramAdapter {
                 self.audit_logger
                     .log_entry(sender_id, None, "help", "success");
                 self.send_redacted_reply(chat_id, help_text).await?;
+            }
+            "/do" => {
+                let task_prompt = args.trim();
+                if task_prompt.is_empty() {
+                    self.send_redacted_reply(
+                        chat_id,
+                        "Usage: /do <task> (e.g. /do open notepad and draft notes)",
+                    )
+                    .await?;
+                } else {
+                    let task = self.task_mgr.create_task(sender_id, task_prompt);
+                    self.task_mgr
+                        .update_task_state(&task.id, TaskState::Running, None, None);
+                    self.audit_logger
+                        .log_entry(sender_id, Some(&task.id), "do", "started");
+
+                    // Check for consequential intents
+                    if let Some(kind) =
+                        ruby_policy::computer_policy::detect_consequential_intent(task_prompt)
+                    {
+                        let code = self.confirmation_mgr.register_action(
+                            "mode_a_task",
+                            &format!("Mode A Task: {}", task_prompt),
+                        );
+                        let expires = crate::confirmation::CONFIRMATION_TTL.as_secs();
+                        self.task_mgr.update_task_state(
+                            &task.id,
+                            TaskState::NeedsInput,
+                            Some(format!("Requires confirmation: {:?}", kind)),
+                            None,
+                        );
+                        let prompt_msg = format!(
+                            "⚠️ Consequential action detected ({:?}) in task [{}].\n\
+                            Confirmation required to proceed:\n\
+                            Type /yes {} (expires in {}s) or /no to reject.",
+                            kind, task.id, code, expires
+                        );
+                        self.send_redacted_reply(chat_id, &prompt_msg).await?;
+                    } else {
+                        let start_msg = format!(
+                            "🚀 Mode A Computer Use task [{}] initiated.\nGoal: \"{}\"\n\
+                            Running live operator with kill switch active. Message /stop at any time to cancel.",
+                            task.id, task_prompt
+                        );
+                        self.send_redacted_reply(chat_id, &start_msg).await?;
+                    }
+                }
             }
             "/ag" => {
                 let ag_reply = crate::antigravity::inspect_antigravity_brain(if args.is_empty() {

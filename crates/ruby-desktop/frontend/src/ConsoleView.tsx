@@ -30,6 +30,23 @@ interface MessageItem {
   timestamp: string;
 }
 
+interface ComputerStepItem {
+  step: number;
+  timestamp: string;
+  action_type: string;
+  coordinates: [number, number] | null;
+  target_window_title: string;
+  status: string;
+}
+
+interface ComputerUseStatus {
+  is_acting: boolean;
+  current_goal: string | null;
+  step_count: number;
+  dry_run: boolean;
+  recent_steps: ComputerStepItem[];
+}
+
 export const ConsoleView: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatus | null>(null);
@@ -48,6 +65,72 @@ export const ConsoleView: React.FC = () => {
   const [isThinking, setIsThinking] = useState(false);
   const [selectedTts, setSelectedTts] = useState("Edge-TTS");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Milestone M4: Computer Use Operator State
+  const [cuGoal, setCuGoal] = useState("");
+  const [cuDryRun, setCuDryRun] = useState(false);
+  const [cuIsActing, setCuIsActing] = useState(false);
+  const [cuCurrentGoal, setCuCurrentGoal] = useState<string | null>(null);
+  const [cuSteps, setCuSteps] = useState<ComputerStepItem[]>([]);
+  const [cuConfirmation, setCuConfirmation] = useState<{
+    code: string;
+    tool_name: string;
+    description: string;
+  } | null>(null);
+  const [cuConfirmCodeInput, setCuConfirmCodeInput] = useState("");
+
+  const fetchCuStatus = async () => {
+    try {
+      const status = await invoke<ComputerUseStatus>("get_computer_use_status");
+      setCuIsActing(status.is_acting);
+      setCuCurrentGoal(status.current_goal);
+      if (status.recent_steps && status.recent_steps.length > 0) {
+        setCuSteps(status.recent_steps);
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleStartComputerUse = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!cuGoal.trim()) return;
+    try {
+      await invoke("start_computer_use_task", { goal: cuGoal.trim(), dryRun: cuDryRun });
+      setCuIsActing(true);
+      setCuCurrentGoal(cuGoal.trim());
+      setNotice(`Mode A Computer Use initiated for "${cuGoal.trim()}"`);
+      setCuGoal("");
+    } catch (err) {
+      setNotice(`Failed to start Computer Use: ${String(err)}`);
+    }
+  };
+
+  const handleStopComputerUse = async () => {
+    try {
+      await invoke("stop_computer_use_task");
+      setCuIsActing(false);
+      setCuCurrentGoal(null);
+      setNotice("Kill Switch: Computer Use operator halted immediately.");
+    } catch (err) {
+      setNotice(`Stop error: ${String(err)}`);
+    }
+  };
+
+  const handleConfirmCode = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!cuConfirmCodeInput.trim()) return;
+    try {
+      const res = await invoke<string>("confirm_tool_execution", {
+        code: cuConfirmCodeInput.trim(),
+      });
+      setNotice(`Action confirmed: ${res}`);
+      setCuConfirmation(null);
+      setCuConfirmCodeInput("");
+    } catch (err) {
+      setNotice(`Confirmation rejected: ${String(err)}`);
+    }
+  };
 
   const fetchRemoteStatus = async () => {
     try {
@@ -135,21 +218,31 @@ export const ConsoleView: React.FC = () => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         handleCancelSpeech();
+        if (cuIsActing) {
+          handleStopComputerUse();
+        }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [cuIsActing]);
 
   useEffect(() => {
     fetchRemoteStatus();
-    const interval = setInterval(fetchRemoteStatus, 4000);
+    fetchCuStatus();
+    const interval = setInterval(() => {
+      fetchRemoteStatus();
+      fetchCuStatus();
+    }, 4000);
     return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
     let unlistenNotice: (() => void) | undefined;
     let unlistenToast: (() => void) | undefined;
+    let unlistenCuStart: (() => void) | undefined;
+    let unlistenCuStop: (() => void) | undefined;
+    let unlistenToolConf: (() => void) | undefined;
 
     listen<string>("console_notice", (event) => {
       setNotice(event.payload);
@@ -167,9 +260,41 @@ export const ConsoleView: React.FC = () => {
       unlistenToast = un;
     });
 
+    listen<{ task_id: string; goal: string; dry_run: boolean }>(
+      "computer_use_started",
+      (ev) => {
+        setCuIsActing(true);
+        setCuCurrentGoal(ev.payload.goal);
+        setNotice(`Operator Acting: "${ev.payload.goal}"`);
+      }
+    ).then((un) => {
+      unlistenCuStart = un;
+    });
+
+    listen<{ reason: string }>("computer_use_stopped", (ev) => {
+      setCuIsActing(false);
+      setCuCurrentGoal(null);
+      setNotice(`Operator Halted: ${ev.payload.reason}`);
+    }).then((un) => {
+      unlistenCuStop = un;
+    });
+
+    listen<{ code: string; tool_name: string; description: string }>(
+      "tool_confirmation_requested",
+      (ev) => {
+        setCuConfirmation(ev.payload);
+        setCuConfirmCodeInput(ev.payload.code);
+      }
+    ).then((un) => {
+      unlistenToolConf = un;
+    });
+
     return () => {
       unlistenNotice?.();
       unlistenToast?.();
+      unlistenCuStart?.();
+      unlistenCuStop?.();
+      unlistenToolConf?.();
     };
   }, []);
 
@@ -697,6 +822,397 @@ export const ConsoleView: React.FC = () => {
                 Offset persisted; replay prevented on restart
               </p>
             </div>
+          </div>
+        </section>
+
+        {/* Milestone M4 Live Computer Use (Mode A) Section */}
+        <section
+          style={{
+            backgroundColor: "#FFFFFF",
+            border: "1px solid #C8C2B5",
+            borderRadius: "1rem",
+            padding: "1.5rem",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: "1rem",
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  borderRadius: "9999px",
+                  border: "1px solid #C8C2B5",
+                  backgroundColor: cuIsActing ? "#F6ECD9" : "#E3EFE8",
+                  padding: "0.25rem 0.875rem",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: cuIsActing ? "#86560D" : "#1D6B52",
+                  fontWeight: 600,
+                  marginBottom: "0.5rem",
+                }}
+              >
+                {cuIsActing ? "OPERATOR ACTIVE (MODE A)" : "LIVE OPERATOR IDLE"}
+              </div>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.75rem",
+                  margin: "0 0 0.25rem",
+                  color: "#16181D",
+                  lineHeight: 1.0,
+                }}
+              >
+                Computer Use Operator
+              </h2>
+              <p style={{ margin: 0, color: "#5F626A", fontSize: "0.875rem" }}>
+                Autonomous desktop operator guided by Gemini vision reasoning and native Win32 SendInput.
+              </p>
+            </div>
+
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+              {cuIsActing && (
+                <button
+                  type="button"
+                  onClick={handleStopComputerUse}
+                  style={{
+                    backgroundColor: "#FFFFFF",
+                    border: "1px solid #B53A26",
+                    color: "#B53A26",
+                    padding: "0.5rem 1rem",
+                    borderRadius: "9999px",
+                    fontWeight: 600,
+                    fontSize: "0.8125rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  Kill Switch (Esc)
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Pending Consequential Confirmation Banner */}
+          {cuConfirmation && (
+            <div
+              style={{
+                backgroundColor: "#F8E9E4",
+                border: "1px solid #B53A26",
+                borderRadius: "0.75rem",
+                padding: "1rem",
+                marginBottom: "1rem",
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: "#B53A26",
+                  fontWeight: 700,
+                  marginBottom: "0.25rem",
+                }}
+              >
+                ⚠️ Consequential Action Confirmation Required
+              </div>
+              <div style={{ color: "#16181D", fontSize: "0.875rem", marginBottom: "0.5rem" }}>
+                Tool <strong>{cuConfirmation.tool_name}</strong>: {cuConfirmation.description}
+              </div>
+              <form onSubmit={handleConfirmCode} style={{ display: "flex", gap: "0.5rem" }}>
+                <input
+                  type="text"
+                  value={cuConfirmCodeInput}
+                  onChange={(e) => setCuConfirmCodeInput(e.target.value)}
+                  placeholder="Enter 4-digit code (e.g. 1234)"
+                  style={{
+                    fontFamily: "'Geist Mono', monospace",
+                    padding: "0.375rem 0.75rem",
+                    borderRadius: "0.375rem",
+                    border: "1px solid #C8C2B5",
+                    fontSize: "0.875rem",
+                    width: "160px",
+                  }}
+                />
+                <button
+                  type="submit"
+                  style={{
+                    backgroundColor: "#16181D",
+                    color: "#F5F3EE",
+                    border: "none",
+                    borderRadius: "9999px",
+                    padding: "0.375rem 1rem",
+                    fontWeight: 600,
+                    fontSize: "0.8125rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  Confirm (/yes)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCuConfirmation(null)}
+                  style={{
+                    backgroundColor: "#FFFFFF",
+                    color: "#5F626A",
+                    border: "1px solid #C8C2B5",
+                    borderRadius: "9999px",
+                    padding: "0.375rem 1rem",
+                    fontWeight: 500,
+                    fontSize: "0.8125rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  Dismiss (/no)
+                </button>
+              </form>
+            </div>
+          )}
+
+          {/* Task Dispatch Form */}
+          <form
+            onSubmit={handleStartComputerUse}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem",
+              marginBottom: "1.25rem",
+            }}
+          >
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <input
+                type="text"
+                value={cuGoal}
+                onChange={(e) => setCuGoal(e.target.value)}
+                placeholder="Enter autonomous desktop goal (e.g. 'open notepad and type meeting minutes')"
+                disabled={cuIsActing}
+                style={{
+                  flex: 1,
+                  padding: "0.625rem 1rem",
+                  borderRadius: "9999px",
+                  border: "1px solid #C8C2B5",
+                  backgroundColor: cuIsActing ? "#EAE7DF" : "#FFFFFF",
+                  color: "#16181D",
+                  fontSize: "0.875rem",
+                  outline: "none",
+                }}
+              />
+              <button
+                type="submit"
+                disabled={cuIsActing || !cuGoal.trim()}
+                style={{
+                  backgroundColor: cuIsActing || !cuGoal.trim() ? "#C8C2B5" : "#16181D",
+                  color: "#F5F3EE",
+                  border: "none",
+                  borderRadius: "9999px",
+                  padding: "0.625rem 1.5rem",
+                  fontWeight: 600,
+                  fontSize: "0.875rem",
+                  cursor: cuIsActing || !cuGoal.trim() ? "not-allowed" : "pointer",
+                }}
+              >
+                Execute
+              </button>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <input
+                type="checkbox"
+                id="dryRunCheckbox"
+                checked={cuDryRun}
+                onChange={(e) => setCuDryRun(e.target.checked)}
+                disabled={cuIsActing}
+              />
+              <label
+                htmlFor="dryRunCheckbox"
+                style={{
+                  fontSize: "0.8125rem",
+                  color: "#5F626A",
+                  cursor: "pointer",
+                }}
+              >
+                Dry-Run Mode (Observe and record proposed actions without dispatching SendInput)
+              </label>
+            </div>
+          </form>
+
+          {/* Active Goal Pill */}
+          {cuCurrentGoal && (
+            <div
+              style={{
+                backgroundColor: "#F6ECD9",
+                border: "1px solid #C8C2B5",
+                borderRadius: "0.5rem",
+                padding: "0.75rem 1rem",
+                marginBottom: "1rem",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <div>
+                <span
+                  style={{
+                    fontFamily: "'Geist Mono', monospace",
+                    fontSize: "10px",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.08em",
+                    color: "#86560D",
+                    fontWeight: 700,
+                    marginRight: "0.5rem",
+                  }}
+                >
+                  ACTIVE GOAL:
+                </span>
+                <span style={{ fontSize: "0.875rem", color: "#16181D", fontWeight: 500 }}>
+                  "{cuCurrentGoal}"
+                </span>
+              </div>
+              <span
+                style={{
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  color: "#86560D",
+                  fontWeight: 600,
+                }}
+              >
+                KILL SWITCH: ESC
+              </span>
+            </div>
+          )}
+
+          {/* Step History & Audit Log */}
+          <div>
+            <div
+              style={{
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                color: "#5F626A",
+                marginBottom: "0.5rem",
+              }}
+            >
+              Live Operator Step Log ({cuSteps.length})
+            </div>
+
+            {cuSteps.length === 0 ? (
+              <div
+                style={{
+                  backgroundColor: "#F5F3EE",
+                  border: "1px dashed #C8C2B5",
+                  borderRadius: "0.75rem",
+                  padding: "1.5rem",
+                  textAlign: "center",
+                  color: "#5F626A",
+                  fontSize: "0.8125rem",
+                }}
+              >
+                No live operator steps currently recorded. Submit a goal above to start.
+              </div>
+            ) : (
+              <div
+                style={{
+                  maxHeight: "220px",
+                  overflowY: "auto",
+                  border: "1px solid #C8C2B5",
+                  borderRadius: "0.75rem",
+                  backgroundColor: "#FFFFFF",
+                }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8125rem" }}>
+                  <thead>
+                    <tr
+                      style={{
+                        backgroundColor: "#F5F3EE",
+                        borderBottom: "1px solid #C8C2B5",
+                        textAlign: "left",
+                        fontFamily: "'Geist Mono', monospace",
+                        fontSize: "10px",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                        color: "#5F626A",
+                      }}
+                    >
+                      <th style={{ padding: "0.5rem 0.75rem" }}>Step</th>
+                      <th style={{ padding: "0.5rem 0.75rem" }}>Action</th>
+                      <th style={{ padding: "0.5rem 0.75rem" }}>Target Window</th>
+                      <th style={{ padding: "0.5rem 0.75rem" }}>Coord</th>
+                      <th style={{ padding: "0.5rem 0.75rem" }}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cuSteps.map((s, idx) => (
+                      <tr
+                        key={idx}
+                        style={{
+                          borderBottom: idx === cuSteps.length - 1 ? "none" : "1px solid #EAE7DF",
+                        }}
+                      >
+                        <td
+                          style={{
+                            padding: "0.5rem 0.75rem",
+                            fontFamily: "'Geist Mono', monospace",
+                            color: "#5F626A",
+                          }}
+                        >
+                          #{s.step}
+                        </td>
+                        <td style={{ padding: "0.5rem 0.75rem", fontWeight: 600, color: "#16181D" }}>
+                          {s.action_type}
+                        </td>
+                        <td style={{ padding: "0.5rem 0.75rem", color: "#5F626A" }}>
+                          {s.target_window_title}
+                        </td>
+                        <td
+                          style={{
+                            padding: "0.5rem 0.75rem",
+                            fontFamily: "'Geist Mono', monospace",
+                            color: "#5F626A",
+                          }}
+                        >
+                          {s.coordinates ? `(${s.coordinates[0]}, ${s.coordinates[1]})` : "—"}
+                        </td>
+                        <td style={{ padding: "0.5rem 0.75rem" }}>
+                          <span
+                            style={{
+                              fontFamily: "'Geist Mono', monospace",
+                              fontSize: "10px",
+                              padding: "0.125rem 0.375rem",
+                              borderRadius: "0.25rem",
+                              backgroundColor:
+                                s.status === "Executed"
+                                  ? "#E3EFE8"
+                                  : s.status === "DryRun"
+                                  ? "#F6ECD9"
+                                  : "#F8E9E4",
+                              color:
+                                s.status === "Executed"
+                                  ? "#1D6B52"
+                                  : s.status === "DryRun"
+                                  ? "#86560D"
+                                  : "#B53A26",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {s.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </section>
 

@@ -3296,7 +3296,10 @@ name = "ruby-actions"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "image",
  "open",
+ "ruby-gemini",
  "ruby-platform",
  "ruby-policy",
  "serde",
@@ -3304,6 +3307,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -3449,6 +3454,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.17",
  "ipnet",
+ "regex",
  "ruby-config",
  "serde",
  "serde_json",

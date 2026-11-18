@@ -537,6 +537,93 @@ pub fn wipe_all_memories(state: State<'_, AppState>) -> Result<usize, String> {
     state.memory_store.wipe_all().map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComputerUseStatus {
+    pub is_acting: bool,
+    pub current_goal: Option<String>,
+    pub step_count: usize,
+    pub dry_run: bool,
+    pub recent_steps: Vec<ruby_actions::computer_use::StepRecord>,
+}
+
+#[tauri::command]
+pub async fn start_computer_use_task(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    goal: String,
+    dry_run: bool,
+) -> Result<String, String> {
+    let trimmed = goal.trim();
+    if trimmed.is_empty() {
+        return Err("Goal cannot be empty".into());
+    }
+
+    *state.computer_use_active_goal.lock().unwrap() = Some(trimmed.to_string());
+
+    // Update orb state to Acting
+    {
+        let mut orb = state.orb_state.lock().unwrap();
+        orb.operational = OperationalState::Acting;
+        orb.emotion = Emotion::Neutral;
+        orb.thinking_spin_active = false;
+        orb.speaking_active = false;
+        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+    }
+
+    let task_id = format!(
+        "cu-{}",
+        ruby_policy::UnifiedConfirmationManager::generate_secure_code_4_digits()
+    );
+    let _ = app.emit(
+        "computer_use_started",
+        serde_json::json!({
+            "task_id": task_id,
+            "goal": trimmed,
+            "dry_run": dry_run
+        }),
+    );
+
+    Ok(task_id)
+}
+
+#[tauri::command]
+pub fn stop_computer_use_task(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.computer_use_kill_switch.cancel();
+    *state.computer_use_active_goal.lock().unwrap() = None;
+
+    {
+        let mut orb = state.orb_state.lock().unwrap();
+        orb.operational = OperationalState::Idle;
+        orb.emotion = Emotion::Neutral;
+        orb.thinking_spin_active = false;
+        orb.speaking_active = false;
+        let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+    }
+
+    let _ = app.emit(
+        "computer_use_stopped",
+        serde_json::json!({ "reason": "user_kill_switch" }),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_computer_use_status(state: State<'_, AppState>) -> Result<ComputerUseStatus, String> {
+    let goal = state.computer_use_active_goal.lock().unwrap().clone();
+    let audit = state.computer_use_audit.lock().unwrap().clone();
+    let is_acting = goal.is_some() && !state.computer_use_kill_switch.is_cancelled();
+
+    Ok(ComputerUseStatus {
+        is_acting,
+        current_goal: goal,
+        step_count: audit.len(),
+        dry_run: false,
+        recent_steps: audit,
+    })
+}
+
 #[cfg(feature = "test-capture")]
 #[tauri::command]
 pub fn save_orb_snapshot(name: String, base64_png: String) -> Result<String, String> {

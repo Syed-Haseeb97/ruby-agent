@@ -1,6 +1,8 @@
 //! Fail-closed security boundaries, path traversal prevention, SSRF filtering,
 //! and the ConfirmationBroker for Ruby Assistant.
 
+pub mod computer_policy;
+
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

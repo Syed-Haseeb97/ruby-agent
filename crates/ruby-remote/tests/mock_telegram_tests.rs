@@ -579,6 +579,90 @@ async fn test_confirmation_plumbing() {
     }
 }
 
+// 7. /do command starts Mode A task, consequential action requires /yes <code>
+#[tokio::test]
+async fn test_telegram_do_command_and_consequential_confirmation() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(88888),
+        allowed_roots: vec![],
+    }));
+
+    let task_mgr = TaskManager::new();
+    let confirmation_mgr = ConfirmationManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        task_mgr.clone(),
+        confirmation_mgr.clone(),
+        AuditLogger::new(audit_file),
+    );
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 7a. Normal harmless Mode A task
+    let harmless_update = serde_json::json!({
+        "update_id": 30,
+        "message": {
+            "message_id": 50,
+            "from": { "id": 88888 },
+            "chat": { "id": 88888, "type": "private" },
+            "date": now_secs,
+            "text": "/do open notepad and draft meeting notes"
+        }
+    });
+    adapter
+        .process_update(harmless_update, now_secs)
+        .await
+        .unwrap();
+
+    let tasks = task_mgr.get_recent_tasks(5);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, TaskState::Running);
+    assert!(tasks[0].raw_prompt.contains("open notepad"));
+
+    // 7b. Consequential task (buy/purchase item) -> escalates to confirmation
+    let purchase_update = serde_json::json!({
+        "update_id": 31,
+        "message": {
+            "message_id": 51,
+            "from": { "id": 88888 },
+            "chat": { "id": 88888, "type": "private" },
+            "date": now_secs,
+            "text": "/do buy new headphones on store checkout"
+        }
+    });
+    adapter
+        .process_update(purchase_update, now_secs)
+        .await
+        .unwrap();
+
+    let tasks = task_mgr.get_recent_tasks(5);
+    assert_eq!(tasks.len(), 2);
+    // Task 2 escalated to NeedsInput
+    assert_eq!(tasks[0].state, TaskState::NeedsInput);
+
+    let sent = mock.sent_messages.lock().unwrap();
+    assert!(sent.iter().any(|s| s["text"]
+        .as_str()
+        .unwrap()
+        .contains("Consequential action detected")
+        && s["text"].as_str().unwrap().contains("Type /yes")));
+}
+
 // 7. Token never in logs and redacted
 #[test]
 fn test_bot_token_redaction() {

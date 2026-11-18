@@ -21,6 +21,7 @@ const COLOR_MAP: Record<string, [string, string]> = {
   Listening: ["#22d3ee", "#2563eb"],
   Thinking: ["#a78bfa", "#4f46e5"],
   Speaking: ["#60a5fa", "#7c3aed"],
+  Acting: ["#d97706", "#b45309"],
   Happy: ["#c084fc", "#3b82f6"],
   Excited: ["#fb7185", "#7c3aed"],
   Sad: ["#60a5fa", "#60a5fa"],
@@ -36,6 +37,7 @@ const MOOD_EXACT_LIGHTER: Record<string, [string, string]> = {
   Listening: ["#c6f7ff", "#67ebff"],
   Thinking: ["#ffffff", "#e8e0ff"],
   Speaking: ["#ffffff", "#b4d6ff"],
+  Acting: ["#fef3c7", "#fde68a"],
   Happy: ["#ffffff", "#eddbff"],
   Excited: ["#ffffff", "#ffc7cf"],
   Sad: ["#b9ddff", "#80bdff"],
@@ -46,7 +48,7 @@ const MOOD_EXACT_LIGHTER: Record<string, [string, string]> = {
 };
 
 export function usesBlackCore(state: OrbVisualState): boolean {
-  if (state.operational === "Thinking" || state.operational === "Error") {
+  if (state.operational === "Thinking" || state.operational === "Error" || state.operational === "Acting") {
     return false;
   }
   if (state.emotion !== "Neutral") {

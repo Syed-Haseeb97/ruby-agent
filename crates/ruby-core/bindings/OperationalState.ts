@@ -3,4 +3,4 @@
 /**
  * Operational state of the assistant.
  */
-export type OperationalState = "Idle" | "Listening" | "Thinking" | "Speaking" | "Error";
+export type OperationalState = "Idle" | "Listening" | "Thinking" | "Speaking" | "Acting" | "Error";
