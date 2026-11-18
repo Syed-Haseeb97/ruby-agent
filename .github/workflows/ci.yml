@@ -37,6 +37,17 @@ jobs:
           npm ci
           npm run build
 
+      - name: Verify No Private Data In Git
+        shell: bash
+        run: |
+          count=$(git ls-files | grep -iE "playwright_profile|\.db$" | wc -l)
+          if [ "$count" -gt 0 ]; then
+            echo "ERROR: Private data or database file tracked in git!"
+            git ls-files | grep -iE "playwright_profile|\.db$"
+            exit 1
+          fi
+          echo "Private data check passed."
+
       - name: Verify Code Formatting
         run: cargo fmt --check
 

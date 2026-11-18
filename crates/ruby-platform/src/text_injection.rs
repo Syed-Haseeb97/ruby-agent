@@ -351,21 +351,87 @@ mod tests {
         assert!(res.is_ok());
     }
 
+    static CLIPBOARD_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_clipboard_multiformat_backup_and_restore() {
+        let _test_lock = CLIPBOARD_TEST_MUTEX.lock().unwrap();
+
         const CF_DIB: u32 = 8;
         const CF_HDROP: u32 = 15;
 
         // Helper to open clipboard with retry
         unsafe fn open_clipboard_retry() -> bool {
-            for _ in 0..10 {
+            for _ in 0..15 {
                 if OpenClipboard(HWND(std::ptr::null_mut())).is_ok() {
                     return true;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(Duration::from_millis(20));
             }
             false
         }
+
+        // 0. Backup user's actual clipboard content so tests NEVER overwrite user's clipboard!
+        let user_original_snapshot = unsafe {
+            let mut snap = Vec::new();
+            if open_clipboard_retry() {
+                let mut fmt = 0u32;
+                loop {
+                    fmt = EnumClipboardFormats(fmt);
+                    if fmt == 0 {
+                        break;
+                    }
+                    if is_hglobal_clipboard_format(fmt) {
+                        if let Ok(handle) = GetClipboardData(fmt) {
+                            if !handle.0.is_null() {
+                                let size = GlobalSize(HGLOBAL(handle.0));
+                                if size > 0 {
+                                    let ptr = GlobalLock(HGLOBAL(handle.0)) as *const u8;
+                                    if !ptr.is_null() {
+                                        let mut data = vec![0u8; size];
+                                        std::ptr::copy_nonoverlapping(ptr, data.as_mut_ptr(), size);
+                                        let _ = GlobalUnlock(HGLOBAL(handle.0));
+                                        snap.push(ClipboardSnapshotEntry {
+                                            format: fmt,
+                                            bytes: data,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = CloseClipboard();
+            }
+            snap
+        };
+
+        struct UserClipboardGuard(Vec<ClipboardSnapshotEntry>);
+        impl Drop for UserClipboardGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if open_clipboard_retry() {
+                        let _ = EmptyClipboard();
+                        for entry in &self.0 {
+                            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, entry.bytes.len()) {
+                                let dest = GlobalLock(hglobal) as *mut u8;
+                                if !dest.is_null() {
+                                    std::ptr::copy_nonoverlapping(
+                                        entry.bytes.as_ptr(),
+                                        dest,
+                                        entry.bytes.len(),
+                                    );
+                                    let _ = GlobalUnlock(hglobal);
+                                    let _ = SetClipboardData(entry.format, HANDLE(hglobal.0));
+                                }
+                            }
+                        }
+                        let _ = CloseClipboard();
+                    }
+                }
+            }
+        }
+        let _user_guard = UserClipboardGuard(user_original_snapshot);
 
         // 1. Stage original multi-format clipboard content:
         // (a) Text (CF_UNICODETEXT)

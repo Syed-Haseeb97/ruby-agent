@@ -89,8 +89,15 @@ pub fn run() {
         println!("============================================================");
     }
 
+    let unified_confirmations = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
+    let remote_confirmation_mgr =
+        ruby_remote::ConfirmationManager::from_unified(Arc::clone(&unified_confirmations));
+
     let bot_token = ruby_remote::get_telegram_bot_token().unwrap_or_default();
-    let remote_adapter = Arc::new(TelegramAdapter::new(bot_token));
+    let remote_adapter = Arc::new(TelegramAdapter::with_confirmation_manager(
+        bot_token,
+        remote_confirmation_mgr,
+    ));
 
     let chat_client: Arc<dyn ChatClient> = Arc::new(GeminiChatClient::default());
     let chat_session = Arc::new(tokio::sync::Mutex::new(ChatSession::new()));
@@ -114,7 +121,11 @@ pub fn run() {
     );
     let sidecar_config = ruby_mcp::McpRegistry::default_playwright_config();
     let sidecar = Arc::new(ruby_mcp::PlaywrightSidecarManager::new(sidecar_config));
-    let tool_manager = Arc::new(ruby_mcp::PolicyGatedToolManager::new(tool_policy, sidecar));
+    let tool_manager = Arc::new(ruby_mcp::PolicyGatedToolManager::with_confirmations(
+        tool_policy,
+        sidecar,
+        Arc::clone(&unified_confirmations),
+    ));
 
     let db_path = ruby_memory::get_default_db_path();
     let memory_store: Arc<dyn ruby_memory::MemoryStore> =

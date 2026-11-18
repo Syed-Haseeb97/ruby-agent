@@ -10,6 +10,60 @@ use ruby_core::{Emotion, OperationalState};
 
 use crate::{AppState, SequencedOrbEvent};
 
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelToolRequest {
+    pub server: String,
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+pub fn extract_tool_call_from_model_output(output: &str) -> Option<ModelToolRequest> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
+        if let Some(tool_obj) = val.get("tool_call") {
+            if let Ok(req) = serde_json::from_value::<ModelToolRequest>(tool_obj.clone()) {
+                return Some(req);
+            }
+        }
+    }
+
+    if let Some(start_idx) = output.find("```tool_call") {
+        let remainder = &output[start_idx + 12..];
+        if let Some(end_idx) = remainder.find("```") {
+            let json_str = remainder[..end_idx].trim();
+            if let Ok(req) = serde_json::from_str::<ModelToolRequest>(json_str) {
+                return Some(req);
+            }
+        }
+    }
+
+    if let Some(idx) = output.find("\"tool_call\":") {
+        let sub = &output[idx + 12..].trim_start();
+        if sub.starts_with('{') {
+            let mut depth = 0;
+            let mut end_idx = 0;
+            for (i, c) in sub.char_indices() {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_idx = i + 1;
+                        break;
+                    }
+                }
+            }
+            if end_idx > 0 {
+                if let Ok(req) = serde_json::from_str::<ModelToolRequest>(&sub[..end_idx]) {
+                    return Some(req);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[tauri::command]
 pub fn get_orb_state(state: State<'_, AppState>) -> SequencedOrbEvent {
     let current = *state.orb_state.lock().unwrap();
@@ -231,6 +285,90 @@ pub async fn send_chat_message(
         let _ = app.emit("toast_notification", notice);
     }
 
+    // 2b. Check if the model requested a tool execution
+    if let Some(tool_req) = extract_tool_call_from_model_output(&chat_resp.text) {
+        let exec_res = state
+            .tool_manager
+            .execute_tool(&tool_req.server, &tool_req.tool, tool_req.arguments.clone())
+            .await;
+
+        let (final_text, final_emotion) = match exec_res {
+            Ok(output) => {
+                let _ = app.emit(
+                    "tool_executed",
+                    serde_json::json!({
+                        "server": tool_req.server,
+                        "tool": tool_req.tool,
+                        "output": output
+                    }),
+                );
+                let text = format!(
+                    "Tool '{}/{}' executed successfully:\n{}",
+                    tool_req.server, tool_req.tool, output
+                );
+                (text, Emotion::Curious)
+            }
+            Err(ruby_mcp::McpError::RequiresConfirmation {
+                code,
+                tool_name,
+                description,
+            }) => {
+                let _ = app.emit(
+                    "tool_confirmation_requested",
+                    serde_json::json!({
+                        "code": code,
+                        "tool_name": tool_name,
+                        "description": description
+                    }),
+                );
+                // Also broadcast notification to paired Telegram user
+                let tg_adapter = Arc::clone(&state.remote_adapter);
+                let tg_code = code.clone();
+                let tg_desc = description.clone();
+                tokio::spawn(async move {
+                    let alert = format!(
+                        "⚠️ Action requires confirmation: {tg_desc}\nReply /yes {tg_code} or /no within 120 seconds."
+                    );
+                    let _ = tg_adapter.broadcast_notification(&alert).await;
+                });
+
+                let text = format!(
+                    "⚠️ Tool execution requires confirmation: {description}.\nReply with /yes {code} or /no to authorize (expires in 120s)."
+                );
+                (text, Emotion::Surprised)
+            }
+            Err(e) => {
+                let text = format!("❌ Tool call '{}' denied or failed: {}", tool_req.tool, e);
+                (text, Emotion::Neutral)
+            }
+        };
+
+        {
+            let mut session = state.chat_session.lock().await;
+            session.add_message(ruby_core::chat::ChatMessage::assistant(
+                &final_text,
+                Some(final_emotion),
+            ));
+        }
+
+        {
+            let mut orb = state.orb_state.lock().unwrap();
+            orb.operational = OperationalState::Speaking;
+            orb.emotion = final_emotion;
+            orb.thinking_spin_active = false;
+            orb.speaking_active = true;
+            let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+        }
+
+        return Ok(ChatTurnResult {
+            response_text: final_text,
+            emotion: final_emotion,
+            served_backend: chat_resp.served_backend,
+            tts_engine: "none".into(),
+        });
+    }
+
     // 3. Parse emotion response
     let (answer_text, emotion) = ruby_core::chat::parse_emotion_response(&chat_resp.text, &message);
     {
@@ -443,5 +581,94 @@ mod tests {
 
         let preview_backend = "gemini-3-flash-preview";
         assert_eq!(check_and_format_freellmapi_notice(preview_backend), None);
+    }
+
+    #[test]
+    fn test_model_tool_call_extraction() {
+        let json_output = r#"{"tool_call":{"server":"playwright","tool":"navigate","arguments":{"url":"https://github.com"}}}"#;
+        let req = extract_tool_call_from_model_output(json_output).expect("Must extract tool call");
+        assert_eq!(req.server, "playwright");
+        assert_eq!(req.tool, "navigate");
+        assert_eq!(req.arguments["url"], "https://github.com");
+
+        let fenced_output = "Here is my plan:\n```tool_call\n{\"server\":\"fs\",\"tool\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}\n```";
+        let req2 =
+            extract_tool_call_from_model_output(fenced_output).expect("Must extract from fence");
+        assert_eq!(req2.server, "fs");
+        assert_eq!(req2.tool, "read_file");
+
+        let text_without_tool =
+            "{\"response\": \"Hello! How can I help you?\", \"emotion\": \"Happy\"}";
+        assert!(extract_tool_call_from_model_output(text_without_tool).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_model_tool_call_policy_gating_and_data_return() {
+        let policy = Arc::new(
+            ruby_policy::DefaultToolSecurityPolicy::with_allowed_domains(vec!["github.com".into()]),
+        );
+        let sidecar_config = ruby_mcp::McpRegistry::default_playwright_config();
+        let sidecar = Arc::new(ruby_mcp::PlaywrightSidecarManager::new(sidecar_config));
+        let confirmations = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
+        let tool_mgr = ruby_mcp::PolicyGatedToolManager::with_confirmations(
+            policy,
+            sidecar,
+            Arc::clone(&confirmations),
+        );
+
+        // 1. Read-only tool automatically executes and returns DATA
+        let read_req = ModelToolRequest {
+            server: "fs".into(),
+            tool: "read_file".into(),
+            arguments: serde_json::json!({ "path": "test.txt" }),
+        };
+        let res = tool_mgr
+            .execute_tool(&read_req.server, &read_req.tool, read_req.arguments)
+            .await;
+        assert!(res.is_ok());
+        let output = res.unwrap();
+        assert!(output.contains("[DATA_OUTPUT]"));
+        assert!(output.contains("[/DATA_OUTPUT]"));
+
+        // 2. Write tool requires confirmation code
+        let write_req = ModelToolRequest {
+            server: "fs".into(),
+            tool: "write_file".into(),
+            arguments: serde_json::json!({ "path": "test.txt", "content": "data" }),
+        };
+        let res_write = tool_mgr
+            .execute_tool(&write_req.server, &write_req.tool, write_req.arguments)
+            .await;
+        match res_write {
+            Err(ruby_mcp::McpError::RequiresConfirmation {
+                code, tool_name, ..
+            }) => {
+                assert_eq!(tool_name, "write_file");
+                assert_eq!(code.len(), 4);
+
+                // /yes <code> confirms and executes from unified manager
+                let conf_res = tool_mgr
+                    .confirm_and_execute(&code)
+                    .await
+                    .expect("Must confirm");
+                assert!(conf_res.contains("[DATA_OUTPUT]"));
+            }
+            other => panic!("Expected RequiresConfirmation, got {:?}", other),
+        }
+
+        // 3. Unknown tool denied by policy
+        let unknown_req = ModelToolRequest {
+            server: "shell".into(),
+            tool: "exec_cmd".into(),
+            arguments: serde_json::json!({}),
+        };
+        let res_unknown = tool_mgr
+            .execute_tool(
+                &unknown_req.server,
+                &unknown_req.tool,
+                unknown_req.arguments,
+            )
+            .await;
+        assert!(res_unknown.is_err());
     }
 }

@@ -140,17 +140,18 @@ pub fn format_memories_as_passive_data(memories: &[MemoryEntry]) -> String {
 }
 
 /// Resolves the default persistent SQLite database path for Ruby.
+/// Defaults to %LOCALAPPDATA%\Ruby\ruby_memory.db, configurable via RUBY_MEMORY_DB_PATH.
 pub fn get_default_db_path() -> PathBuf {
-    let drive_d = PathBuf::from(r"D:\projects\ruby-agent\workspace\ruby_memory.db");
-    if let Some(parent) = drive_d.parent() {
-        if parent.exists() || fs::create_dir_all(parent).is_ok() {
-            return drive_d;
+    if let Ok(custom) = std::env::var("RUBY_MEMORY_DB_PATH") {
+        let p = PathBuf::from(custom);
+        if let Some(parent) = p.parent() {
+            let _ = fs::create_dir_all(parent);
         }
+        return p;
     }
 
-    // Fallback to %LOCALAPPDATA%\Ruby\ruby_memory.db
     let local_appdata = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| r"D:\projects\ruby-agent\workspace".to_string());
+        .unwrap_or_else(|_| r"C:\Users\ADMIN\AppData\Local".to_string());
     let fallback = PathBuf::from(local_appdata)
         .join("Ruby")
         .join("ruby_memory.db");

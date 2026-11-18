@@ -3,7 +3,7 @@
 //! with automatic fallback to `%LOCALAPPDATA%\Ruby` when Drive D: is unavailable.
 //! Credentials use Windows Credential Manager via the `keyring` crate.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,36 +20,48 @@ pub struct RubyPaths {
     pub screenshots_dir: PathBuf,
     pub recordings_dir: PathBuf,
     pub memory_db_path: PathBuf,
+    pub playwright_profile_dir: PathBuf,
 }
 
 impl RubyPaths {
-    /// Resolve runtime paths with Drive D: default and graceful fallback.
+    /// Resolve runtime paths with %LOCALAPPDATA%\Ruby\ default, configurable via env variables.
     pub fn resolve() -> Self {
-        let drive_d = Path::new("D:\\");
-        let (base_workspace, base_shots, base_rec) = if drive_d.exists() {
-            (
-                PathBuf::from("D:\\projects\\ruby-agent\\workspace"),
-                PathBuf::from("D:\\screen_shots"),
-                PathBuf::from("D:\\recordings"),
-            )
+        let base_ruby = if let Ok(custom) = std::env::var("RUBY_DATA_DIR") {
+            PathBuf::from(custom)
+        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            PathBuf::from(local_app_data).join("Ruby")
         } else {
-            let app_data = directories::ProjectDirs::from("com", "ruby", "RubyAssistant")
+            directories::ProjectDirs::from("com", "ruby", "RubyAssistant")
                 .map(|p| p.data_local_dir().to_path_buf())
-                .unwrap_or_else(|| PathBuf::from(".ruby_data"));
-            (
-                app_data.join("workspace"),
-                app_data.join("screenshots"),
-                app_data.join("recordings"),
-            )
+                .unwrap_or_else(|| PathBuf::from(".ruby_data"))
         };
 
-        let memory_db_path = base_workspace.join("ruby_memory.db");
+        let workspace_dir = std::env::var("RUBY_WORKSPACE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("workspace"));
+
+        let screenshots_dir = std::env::var("RUBY_SCREENSHOTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("screenshots"));
+
+        let recordings_dir = std::env::var("RUBY_RECORDINGS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("recordings"));
+
+        let memory_db_path = std::env::var("RUBY_MEMORY_DB_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("ruby_memory.db"));
+
+        let playwright_profile_dir = std::env::var("RUBY_PLAYWRIGHT_PROFILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("playwright_profile"));
 
         Self {
-            workspace_dir: base_workspace,
-            screenshots_dir: base_shots,
-            recordings_dir: base_rec,
+            workspace_dir,
+            screenshots_dir,
+            recordings_dir,
             memory_db_path,
+            playwright_profile_dir,
         }
     }
 

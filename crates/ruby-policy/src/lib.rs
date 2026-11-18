@@ -1,7 +1,10 @@
 //! Fail-closed security boundaries, path traversal prevention, SSRF filtering,
 //! and the ConfirmationBroker for Ruby Assistant.
 
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -26,6 +29,167 @@ pub enum PolicyError {
     UnknownToolDenied(String),
     #[error("Domain blocked by security policy: {0}")]
     DomainBlocked(String),
+    #[error("Permission denied: {0}")]
+    PermissionDenied(String),
+}
+
+/// Parses alternate IP representations including decimal (integer), hex, and octal.
+pub fn parse_ip_or_numeric_host(host: &str) -> Option<IpAddr> {
+    let clean = host.trim_matches(|c| c == '[' || c == ']');
+    if clean.is_empty() {
+        return None;
+    }
+
+    // 1. Standard IP parse
+    if let Ok(ip) = clean.parse::<IpAddr>() {
+        return Some(ip);
+    }
+
+    // 2. Pure integer (decimal IP e.g. 2130706433 -> 127.0.0.1)
+    if clean.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(num) = clean.parse::<u32>() {
+            return Some(IpAddr::V4(Ipv4Addr::from(num)));
+        }
+    }
+
+    // 3. Hexadecimal IP (e.g. 0x7f000001 or 0x7f.0.0.1)
+    if clean.starts_with("0x") || clean.starts_with("0X") {
+        let hex_str = &clean[2..];
+        if let Ok(num) = u32::from_str_radix(hex_str, 16) {
+            return Some(IpAddr::V4(Ipv4Addr::from(num)));
+        }
+    }
+
+    // 4. Dotted hex or octal parts (e.g. 0x7f.0.0.1 or 0177.0.0.1)
+    let parts: Vec<&str> = clean.split('.').collect();
+    if parts.len() == 4 {
+        let mut octets = [0u8; 4];
+        let mut all_valid = true;
+        for (i, part) in parts.iter().enumerate() {
+            let val = if part.starts_with("0x") || part.starts_with("0X") {
+                u32::from_str_radix(&part[2..], 16)
+            } else if part.len() > 1
+                && part.starts_with('0')
+                && part.chars().all(|c| ('0'..='7').contains(&c))
+            {
+                u32::from_str_radix(&part[1..], 8)
+            } else {
+                part.parse::<u32>()
+            };
+
+            match val {
+                Ok(v) if v <= 255 => octets[i] = v as u8,
+                _ => {
+                    all_valid = false;
+                    break;
+                }
+            }
+        }
+        if all_valid {
+            return Some(IpAddr::V4(Ipv4Addr::new(
+                octets[0], octets[1], octets[2], octets[3],
+            )));
+        }
+    }
+
+    None
+}
+
+/// Checks if an IP address is private, loopback, link-local, unspecified, or reserved.
+pub fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // Loopback (127.0.0.0/8)
+            if octets[0] == 127 || v4.is_loopback() {
+                return true;
+            }
+            // Unspecified / current network (0.0.0.0/8)
+            if octets[0] == 0 {
+                return true;
+            }
+            // Broadcast (255.255.255.255)
+            if v4.is_broadcast() {
+                return true;
+            }
+            // Private (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+            if octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || v4.is_private()
+            {
+                return true;
+            }
+            // Link-local / Cloud metadata (169.254.0.0/16)
+            if (octets[0] == 169 && octets[1] == 254) || v4.is_link_local() {
+                return true;
+            }
+            // CGNAT (100.64.0.0/10)
+            if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                return true;
+            }
+            // Documentation (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24)
+            if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+                || v4.is_documentation()
+            {
+                return true;
+            }
+            // Benchmark (198.18.0.0/15)
+            if octets[0] == 198 && (18..=19).contains(&octets[1]) {
+                return true;
+            }
+            // Multicast (224.0.0.0/4)
+            if v4.is_multicast() {
+                return true;
+            }
+            false
+        }
+        IpAddr::V6(v6) => {
+            // Loopback (::1)
+            if v6.is_loopback() {
+                return true;
+            }
+            // Unspecified (::)
+            if v6.is_unspecified() {
+                return true;
+            }
+            // Multicast (ff00::/8)
+            if v6.is_multicast() {
+                return true;
+            }
+            let segments = v6.segments();
+            // Unique Local Address ULA (fc00::/7)
+            if (segments[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // Link-local unicast (fe80::/10)
+            if (segments[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // IPv4-mapped IPv6 (::ffff:127.0.0.1)
+            if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                return is_blocked_ip(IpAddr::V4(mapped_v4));
+            }
+            // Embedded IPv4 check for 96 zero bits
+            if segments[0] == 0
+                && segments[1] == 0
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+            {
+                let mapped = Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    segments[6] as u8,
+                    (segments[7] >> 8) as u8,
+                    segments[7] as u8,
+                );
+                return is_blocked_ip(IpAddr::V4(mapped));
+            }
+            false
+        }
+    }
 }
 
 pub trait SecurityPolicy: Send + Sync {
@@ -218,27 +382,40 @@ impl SecurityPolicy for DefaultSecurityPolicy {
 
     fn validate_url(&self, url: &url::Url) -> Result<(), PolicyError> {
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host.is_empty() {
+            return Err(PolicyError::SsrfBlocked("Empty host in URL".into()));
+        }
+
+        // 1. Literal host name check
         if host == "localhost"
+            || host == "0.0.0.0"
             || host == "127.0.0.1"
             || host == "::1"
             || host == "169.254.169.254"
-            || host.ends_with(".internal")
+            || host.ends_with(".localhost")
             || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || host.ends_with(".arpa")
         {
             return Err(PolicyError::SsrfBlocked(host));
         }
 
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                        return Err(PolicyError::SsrfBlocked(host));
-                    }
-                }
-                std::net::IpAddr::V6(v6) => {
-                    if v6.is_loopback() {
-                        return Err(PolicyError::SsrfBlocked(host));
-                    }
+        // 2. Alternate numeric/hex/octal/IPv6 IP parse
+        if let Some(ip) = parse_ip_or_numeric_host(&host) {
+            if is_blocked_ip(ip) {
+                return Err(PolicyError::SsrfBlocked(format!("{host} (parsed as {ip})")));
+            }
+        }
+
+        // 3. DNS resolution check: resolve host to all IPs
+        let port = url.port_or_known_default().unwrap_or(80);
+        if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
+            for addr in addrs {
+                if is_blocked_ip(addr.ip()) {
+                    return Err(PolicyError::SsrfBlocked(format!(
+                        "{host} (resolves to blocked IP {})",
+                        addr.ip()
+                    )));
                 }
             }
         }
@@ -399,30 +576,39 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
         let parsed = url::Url::parse(raw_url)
             .map_err(|e| PolicyError::SsrfBlocked(format!("Invalid URL syntax: {e}")))?;
 
+        // 1. SSRF prevention
         let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host.is_empty() {
+            return Err(PolicyError::SsrfBlocked("Empty host in URL".into()));
+        }
 
-        // 1. SSRF prevention: forbid local, link-local, loopback, internal
         if host == "localhost"
+            || host == "0.0.0.0"
             || host == "127.0.0.1"
             || host == "::1"
             || host == "169.254.169.254"
-            || host.ends_with(".internal")
+            || host.ends_with(".localhost")
             || host.ends_with(".local")
+            || host.ends_with(".internal")
+            || host.ends_with(".arpa")
         {
             return Err(PolicyError::SsrfBlocked(host));
         }
 
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            match ip {
-                std::net::IpAddr::V4(v4) => {
-                    if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                        return Err(PolicyError::SsrfBlocked(host));
-                    }
-                }
-                std::net::IpAddr::V6(v6) => {
-                    if v6.is_loopback() {
-                        return Err(PolicyError::SsrfBlocked(host));
-                    }
+        if let Some(ip) = parse_ip_or_numeric_host(&host) {
+            if is_blocked_ip(ip) {
+                return Err(PolicyError::SsrfBlocked(format!("{host} (parsed as {ip})")));
+            }
+        }
+
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
+            for addr in addrs {
+                if is_blocked_ip(addr.ip()) {
+                    return Err(PolicyError::SsrfBlocked(format!(
+                        "{host} (resolves to blocked IP {})",
+                        addr.ip()
+                    )));
                 }
             }
         }
@@ -443,6 +629,182 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
         }
 
         Ok(parsed)
+    }
+}
+
+pub const UNIFIED_CONFIRMATION_TTL: Duration = Duration::from_secs(120);
+pub const MAX_CONFIRMATION_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PendingUnifiedAction {
+    pub id: String,
+    pub code: String,
+    pub server: String,
+    pub tool_name: String,
+    pub arguments: serde_json::Value,
+    pub description: String,
+    pub failed_attempts: u32,
+    #[serde(skip, default = "Instant::now")]
+    pub created_at: Instant,
+    #[serde(skip, default = "default_expiry")]
+    pub expires_at: Instant,
+}
+
+fn default_expiry() -> Instant {
+    Instant::now() + UNIFIED_CONFIRMATION_TTL
+}
+
+#[derive(Debug, Clone)]
+pub struct UnifiedConfirmationManager {
+    pending: Arc<std::sync::Mutex<Option<PendingUnifiedAction>>>,
+}
+
+impl Default for UnifiedConfirmationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UnifiedConfirmationManager {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Generates a cryptographically secure 4-digit code (1000..=9999) using OS CSPRNG.
+    pub fn generate_secure_code_4_digits() -> String {
+        let mut bytes = [0u8; 4];
+        getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
+        let num = u32::from_ne_bytes(bytes);
+        let code = (num % 9000) + 1000;
+        format!("{:04}", code)
+    }
+
+    /// Registers a pending action and returns the secure 4-digit code.
+    pub fn register_action(
+        &self,
+        server: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        description: &str,
+    ) -> String {
+        let code = Self::generate_secure_code_4_digits();
+        let now = Instant::now();
+        let action = PendingUnifiedAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            code: code.clone(),
+            server: server.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments,
+            description: description.to_string(),
+            failed_attempts: 0,
+            created_at: now,
+            expires_at: now + UNIFIED_CONFIRMATION_TTL,
+        };
+
+        if let Ok(mut lock) = self.pending.lock() {
+            *lock = Some(action);
+        }
+
+        code
+    }
+
+    /// Explicitly registers an action with a predefined code and TTL (for deterministic testing).
+    pub fn register_action_with_code(
+        &self,
+        server: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        description: &str,
+        code: &str,
+        ttl: Duration,
+    ) {
+        let now = Instant::now();
+        let action = PendingUnifiedAction {
+            id: uuid::Uuid::new_v4().to_string(),
+            code: code.to_string(),
+            server: server.to_string(),
+            tool_name: tool_name.to_string(),
+            arguments,
+            description: description.to_string(),
+            failed_attempts: 0,
+            created_at: now,
+            expires_at: now + ttl,
+        };
+
+        if let Ok(mut lock) = self.pending.lock() {
+            *lock = Some(action);
+        }
+    }
+
+    /// Verifies the confirmation code:
+    /// - If expired -> removes action and returns error
+    /// - If matched -> consumes action and returns action details
+    /// - If mismatched -> increments failed_attempts; if >= 5 drops action completely
+    pub fn verify_and_consume(
+        &self,
+        input_code: &str,
+    ) -> Result<PendingUnifiedAction, PolicyError> {
+        let mut lock = self
+            .pending
+            .lock()
+            .map_err(|_| PolicyError::PermissionDenied("Lock poisoned".into()))?;
+
+        if let Some(mut action) = lock.take() {
+            if Instant::now() > action.expires_at {
+                return Err(PolicyError::PermissionDenied(
+                    "Confirmation code has expired (120s limit)".into(),
+                ));
+            }
+
+            if action.code.trim() == input_code.trim() {
+                Ok(action)
+            } else {
+                action.failed_attempts += 1;
+                if action.failed_attempts >= MAX_CONFIRMATION_ATTEMPTS {
+                    Err(PolicyError::PermissionDenied(
+                        "Maximum failed confirmation attempts (5) exceeded; action invalidated"
+                            .into(),
+                    ))
+                } else {
+                    let remaining = MAX_CONFIRMATION_ATTEMPTS - action.failed_attempts;
+                    *lock = Some(action);
+                    Err(PolicyError::PermissionDenied(format!(
+                        "Incorrect confirmation code ({remaining} attempts remaining)"
+                    )))
+                }
+            }
+        } else {
+            Err(PolicyError::PermissionDenied(
+                "No pending action waiting for confirmation".into(),
+            ))
+        }
+    }
+
+    /// Cancels any currently pending action.
+    pub fn cancel_pending(&self) -> Option<PendingUnifiedAction> {
+        if let Ok(mut lock) = self.pending.lock() {
+            lock.take()
+        } else {
+            None
+        }
+    }
+
+    /// Inspects whether there is a pending action without consuming it.
+    pub fn get_pending_summary(&self) -> Option<(String, Duration)> {
+        if let Ok(lock) = self.pending.lock() {
+            if let Some(action) = lock.as_ref() {
+                let now = Instant::now();
+                if now <= action.expires_at {
+                    return Some((
+                        action.description.clone(),
+                        action.expires_at.duration_since(now),
+                    ));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -759,5 +1121,173 @@ mod tests {
         let ssrf_args = serde_json::json!({ "url": "http://127.0.0.1:8080/admin" });
         let ssrf_res = policy.validate_tool_call("playwright", "navigate", &ssrf_args);
         assert!(matches!(ssrf_res, Err(PolicyError::SsrfBlocked(_))));
+    }
+
+    #[test]
+    fn test_comprehensive_ssrf_rejection_classes() {
+        let policy = DefaultToolSecurityPolicy::new(vec![], Default::default());
+
+        // 1. Loopback IPv4, IPv6, localhost
+        let test_cases_loopback = [
+            "http://127.0.0.1/status",
+            "http://127.1.2.3:8080/",
+            "http://localhost:3000/",
+            "http://test.localhost/",
+            "http://[::1]/",
+        ];
+        for url in test_cases_loopback {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block loopback: {url}"
+            );
+        }
+
+        // 2. Private ranges (10/8, 172.16/12, 192.168/16)
+        let test_cases_private = [
+            "http://10.0.0.1/admin",
+            "http://10.255.255.254/",
+            "http://172.16.0.1/",
+            "http://172.31.255.255/",
+            "http://192.168.1.1/router",
+            "http://192.168.0.100/",
+        ];
+        for url in test_cases_private {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block private IP: {url}"
+            );
+        }
+
+        // 3. Link-local (169.254/16) and cloud metadata
+        let test_cases_link_local = [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.1.1/",
+            "http://[fe80::1]/",
+        ];
+        for url in test_cases_link_local {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block link-local: {url}"
+            );
+        }
+
+        // 4. Unspecified 0.0.0.0 and broadcast
+        let test_cases_unspecified = [
+            "http://0.0.0.0:8000/",
+            "http://0/",
+            "http://[::]/",
+            "http://255.255.255.255/",
+        ];
+        for url in test_cases_unspecified {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block unspecified: {url}"
+            );
+        }
+
+        // 5. IPv6 ULA (fc00::/7) and mapped IPv4 (::ffff:127.0.0.1)
+        let test_cases_ipv6 = [
+            "http://[fc00::1]/",
+            "http://[fd12:3456:789a::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:10.0.0.1]/",
+            "http://[::127.0.0.1]/",
+        ];
+        for url in test_cases_ipv6 {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block IPv6 special form: {url}"
+            );
+        }
+
+        // 6. Alternate IP spellings (decimal, hex, octal)
+        let test_cases_alternate = [
+            "http://2130706433/",   // 127.0.0.1 in decimal integer
+            "http://0x7f000001/",   // 127.0.0.1 in monolithic hex
+            "http://0x7f.0.0.1/",   // 127.0.0.1 in dotted hex
+            "http://0177.0.0.1/",   // 127.0.0.1 in dotted octal
+            "http://017700000001/", // 127.0.0.1 in monolithic octal
+            "http://0x0a000001/",   // 10.0.0.1 in hex
+            "http://167772161/",    // 10.0.0.1 in decimal
+        ];
+        for url in test_cases_alternate {
+            let res = policy.validate_browser_url(url);
+            assert!(
+                matches!(res, Err(PolicyError::SsrfBlocked(_))),
+                "Failed to block alternate spelling: {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unified_confirmation_manager_lifecycle_ttl_and_attempt_capping() {
+        let mgr = UnifiedConfirmationManager::new();
+
+        // 1. Generate code check CSPRNG bounds (1000..=9999)
+        for _ in 0..20 {
+            let code = UnifiedConfirmationManager::generate_secure_code_4_digits();
+            assert_eq!(code.len(), 4);
+            let val = code.parse::<u32>().unwrap();
+            assert!((1000..=9999).contains(&val));
+        }
+
+        // 2. Action registration and exact action binding
+        let args = serde_json::json!({ "path": "test.txt", "content": "hello" });
+        let code = mgr.register_action("fs", "write_file", args.clone(), "Write test file");
+        assert_eq!(code.len(), 4);
+
+        // 3. Failed attempts capped at 5 -> drops action
+        for remaining in (1..5).rev() {
+            let res = mgr.verify_and_consume("0000"); // wrong code
+            assert!(res.is_err());
+            let err_msg = res.unwrap_err().to_string();
+            assert!(err_msg.contains(&format!("{remaining} attempts remaining")));
+        }
+        // 5th failed attempt -> max exceeded & action invalidated
+        let res5 = mgr.verify_and_consume("0000");
+        assert!(res5.is_err());
+        assert!(res5
+            .unwrap_err()
+            .to_string()
+            .contains("Maximum failed confirmation attempts (5) exceeded"));
+
+        // Subsequent attempt now reports no pending action
+        let res_subsequent = mgr.verify_and_consume(&code);
+        assert!(res_subsequent.is_err());
+        assert!(res_subsequent
+            .unwrap_err()
+            .to_string()
+            .contains("No pending action"));
+
+        // 4. Test TTL expiry
+        mgr.register_action_with_code(
+            "fs",
+            "delete_file",
+            serde_json::json!({}),
+            "Delete file",
+            "1234",
+            Duration::from_millis(10),
+        );
+        std::thread::sleep(Duration::from_millis(25));
+        let res_expired = mgr.verify_and_consume("1234");
+        assert!(res_expired.is_err());
+        assert!(res_expired.unwrap_err().to_string().contains("expired"));
+
+        // 5. Successful verification consumes action
+        let success_code = mgr.register_action("fs", "write_file", args.clone(), "Write test file");
+        let verified = mgr
+            .verify_and_consume(&success_code)
+            .expect("Must verify successfully");
+        assert_eq!(verified.server, "fs");
+        assert_eq!(verified.tool_name, "write_file");
+        assert_eq!(verified.arguments, args);
+
+        // Cannot consume twice
+        assert!(mgr.verify_and_consume(&success_code).is_err());
     }
 }

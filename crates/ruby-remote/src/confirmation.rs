@@ -1,10 +1,12 @@
-//! Random 4-digit confirmation plumbing for dangerous / escalated actions with 120s TTL.
+//! Random 4-digit confirmation plumbing for dangerous / escalated actions with 120s TTL
+//! backed by `ruby_policy::UnifiedConfirmationManager`.
 
 use crate::types::RemoteError;
-use std::sync::{Arc, Mutex};
+use ruby_policy::UnifiedConfirmationManager;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
+pub const CONFIRMATION_TTL: Duration = ruby_policy::UNIFIED_CONFIRMATION_TTL;
 
 #[derive(Clone, Debug)]
 pub struct PendingAction {
@@ -17,7 +19,7 @@ pub struct PendingAction {
 
 #[derive(Clone)]
 pub struct ConfirmationManager {
-    pending: Arc<Mutex<Option<PendingAction>>>,
+    inner: Arc<UnifiedConfirmationManager>,
 }
 
 impl Default for ConfirmationManager {
@@ -29,37 +31,27 @@ impl Default for ConfirmationManager {
 impl ConfirmationManager {
     pub fn new() -> Self {
         Self {
-            pending: Arc::new(Mutex::new(None)),
+            inner: Arc::new(UnifiedConfirmationManager::new()),
         }
+    }
+
+    pub fn from_unified(inner: Arc<UnifiedConfirmationManager>) -> Self {
+        Self { inner }
+    }
+
+    pub fn unified(&self) -> Arc<UnifiedConfirmationManager> {
+        self.inner.clone()
     }
 
     /// Generates a cryptographically secure 4-digit code using OS CSPRNG.
     pub fn generate_secure_code_4_digits() -> String {
-        let mut bytes = [0u8; 4];
-        getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
-        let num = u32::from_ne_bytes(bytes);
-        let code = (num % 9_000) + 1_000;
-        format!("{:04}", code)
+        UnifiedConfirmationManager::generate_secure_code_4_digits()
     }
 
     /// Registers a pending action and returns the random 4-digit code.
     pub fn register_action(&self, action_id: &str, description: &str) -> String {
-        let code = Self::generate_secure_code_4_digits();
-
-        let now = Instant::now();
-        let action = PendingAction {
-            action_id: action_id.to_string(),
-            code: code.clone(),
-            description: description.to_string(),
-            created_at: now,
-            expires_at: now + CONFIRMATION_TTL,
-        };
-
-        if let Ok(mut lock) = self.pending.lock() {
-            *lock = Some(action);
-        }
-
-        code
+        self.inner
+            .register_action("remote", action_id, serde_json::json!({}), description)
     }
 
     /// Explicitly registers with a known code (useful for deterministic testing).
@@ -70,65 +62,51 @@ impl ConfirmationManager {
         code: &str,
         ttl: Duration,
     ) {
-        let now = Instant::now();
-        let action = PendingAction {
-            action_id: action_id.to_string(),
-            code: code.to_string(),
-            description: description.to_string(),
-            created_at: now,
-            expires_at: now + ttl,
-        };
-        if let Ok(mut lock) = self.pending.lock() {
-            *lock = Some(action);
-        }
+        self.inner.register_action_with_code(
+            "remote",
+            action_id,
+            serde_json::json!({}),
+            description,
+            code,
+            ttl,
+        );
     }
 
     /// Verifies the provided 4-digit code. If matched and not expired, clears pending and returns description.
     pub fn verify_code(&self, input_code: &str) -> Result<PendingAction, RemoteError> {
-        let mut lock = self
-            .pending
-            .lock()
-            .map_err(|_| RemoteError::Auth("Lock poisoned".to_string()))?;
-        if let Some(action) = lock.take() {
-            if Instant::now() > action.expires_at {
-                return Err(RemoteError::InvalidCode(
-                    "Confirmation code has expired (120s limit)".to_string(),
-                ));
-            }
-            if action.code.trim() == input_code.trim() {
-                Ok(action)
-            } else {
-                // Restore if mismatched so user can retry within TTL
-                *lock = Some(action);
-                Err(RemoteError::InvalidCode(
-                    "Incorrect confirmation code".to_string(),
-                ))
-            }
-        } else {
-            Err(RemoteError::InvalidCode(
-                "No pending action waiting for confirmation".to_string(),
-            ))
+        match self.inner.verify_and_consume(input_code) {
+            Ok(action) => Ok(PendingAction {
+                action_id: action.tool_name,
+                code: action.code,
+                description: action.description,
+                created_at: action.created_at,
+                expires_at: action.expires_at,
+            }),
+            Err(e) => Err(RemoteError::InvalidCode(e.to_string())),
         }
     }
 
     /// Cancels any currently pending action (e.g. on /no or /stop).
     pub fn cancel_pending(&self) -> Option<PendingAction> {
-        if let Ok(mut lock) = self.pending.lock() {
-            lock.take()
-        } else {
-            None
-        }
+        self.inner.cancel_pending().map(|a| PendingAction {
+            action_id: a.tool_name,
+            code: a.code,
+            description: a.description,
+            created_at: a.created_at,
+            expires_at: a.expires_at,
+        })
     }
 
     /// Returns the active pending action if not expired.
     pub fn get_active_pending(&self) -> Option<PendingAction> {
-        if let Ok(lock) = self.pending.lock() {
-            if let Some(ref act) = *lock {
-                if Instant::now() <= act.expires_at {
-                    return Some(act.clone());
-                }
-            }
-        }
-        None
+        self.inner
+            .get_pending_summary()
+            .map(|(desc, rem)| PendingAction {
+                action_id: "pending".into(),
+                code: "".into(),
+                description: desc,
+                created_at: Instant::now(),
+                expires_at: Instant::now() + rem,
+            })
     }
 }

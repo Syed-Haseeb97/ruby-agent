@@ -20,6 +20,9 @@ print(f"Scanning {len(files)} staged files for secrets...")
 found_secrets = []
 
 for f in files:
+    if "playwright_profile" in f.lower() or f.lower().endswith(".db"):
+        found_secrets.append((f, "Forbidden Private Data / Database File in Git", 1))
+
     full_path = os.path.join(r"D:\projects\ruby-agent", f)
     if not os.path.isfile(full_path):
         continue

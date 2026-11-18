@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -359,12 +359,39 @@ pub struct HttpMcpClient {
 
 impl HttpMcpClient {
     pub fn new(endpoint_url: String, timeout_secs: u64) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("Too many redirects")
+                } else {
+                    let target_url = attempt.url();
+                    let host = target_url
+                        .host_str()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if host == "localhost"
+                        || host == "0.0.0.0"
+                        || host == "127.0.0.1"
+                        || host == "::1"
+                        || host == "169.254.169.254"
+                    {
+                        return attempt.error("SSRF redirect blocked to loopback/metadata host");
+                    }
+                    if let Some(ip) = ruby_policy::parse_ip_or_numeric_host(&host) {
+                        if ruby_policy::is_blocked_ip(ip) {
+                            return attempt.error("SSRF redirect blocked to private/loopback IP");
+                        }
+                    }
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .unwrap_or_default();
+
         Self {
             endpoint_url,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(timeout_secs))
-                .build()
-                .unwrap_or_default(),
+            client,
             req_counter: AtomicU64::new(1),
         }
     }
@@ -458,7 +485,25 @@ pub struct McpRegistry {
 }
 
 impl McpRegistry {
+    /// Resolves the isolated Playwright profile directory.
+    /// Defaults to %LOCALAPPDATA%\Ruby\playwright_profile, configurable via RUBY_PLAYWRIGHT_PROFILE.
+    pub fn default_playwright_profile_dir() -> PathBuf {
+        if let Ok(custom) = std::env::var("RUBY_PLAYWRIGHT_PROFILE") {
+            let p = PathBuf::from(custom);
+            let _ = fs::create_dir_all(&p);
+            return p;
+        }
+        let local_appdata = std::env::var("LOCALAPPDATA")
+            .unwrap_or_else(|_| r"C:\Users\ADMIN\AppData\Local".to_string());
+        let p = PathBuf::from(local_appdata)
+            .join("Ruby")
+            .join("playwright_profile");
+        let _ = fs::create_dir_all(&p);
+        p
+    }
+
     pub fn default_playwright_config() -> McpServerConfig {
+        let profile_dir = Self::default_playwright_profile_dir();
         McpServerConfig {
             name: "playwright".to_string(),
             command: Some("npx".to_string()),
@@ -468,7 +513,7 @@ impl McpRegistry {
                 "--browser".to_string(),
                 "msedge".to_string(),
                 "--user-data-dir".to_string(),
-                r"D:\projects\ruby-agent\workspace\playwright_profile".to_string(),
+                profile_dir.to_string_lossy().to_string(),
             ],
             env: HashMap::new(),
             url: None,
@@ -562,13 +607,13 @@ impl PlaywrightSidecarManager {
     }
 }
 
-pub type PendingActionMap = HashMap<String, (String, String, serde_json::Value)>;
+use ruby_policy::UnifiedConfirmationManager;
 
 /// Policy-gated tool execution manager combining `ToolSecurityPolicy` and MCP execution.
 pub struct PolicyGatedToolManager {
     policy: Arc<dyn ToolSecurityPolicy>,
     playwright: Arc<PlaywrightSidecarManager>,
-    pending_confirmations: Arc<Mutex<PendingActionMap>>,
+    confirmations: Arc<UnifiedConfirmationManager>,
 }
 
 impl PolicyGatedToolManager {
@@ -579,8 +624,24 @@ impl PolicyGatedToolManager {
         Self {
             policy,
             playwright,
-            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            confirmations: Arc::new(UnifiedConfirmationManager::new()),
         }
+    }
+
+    pub fn with_confirmations(
+        policy: Arc<dyn ToolSecurityPolicy>,
+        playwright: Arc<PlaywrightSidecarManager>,
+        confirmations: Arc<UnifiedConfirmationManager>,
+    ) -> Self {
+        Self {
+            policy,
+            playwright,
+            confirmations,
+        }
+    }
+
+    pub fn confirmation_manager(&self) -> Arc<UnifiedConfirmationManager> {
+        self.confirmations.clone()
     }
 
     /// Validates and executes a tool call, requiring confirmation for Write/Destructive actions.
@@ -596,11 +657,9 @@ impl PolicyGatedToolManager {
         // 2. Risk check: Write and Destructive require confirmation
         if risk == RiskClass::Write || risk == RiskClass::Destructive {
             let desc = format!("Execute {risk:?} tool '{tool_name}' on server '{server}'");
-            let code = format!("{:04}", (std::process::id() + 4821) % 10000); // 4-digit verification code
-            self.pending_confirmations.lock().await.insert(
-                code.clone(),
-                (server.to_string(), tool_name.to_string(), args.clone()),
-            );
+            let code = self
+                .confirmations
+                .register_action(server, tool_name, args.clone(), &desc);
             return Err(McpError::RequiresConfirmation {
                 code,
                 tool_name: tool_name.to_string(),
@@ -621,20 +680,20 @@ impl PolicyGatedToolManager {
 
     /// Confirms and executes a pending action via its 4-digit code.
     pub async fn confirm_and_execute(&self, code: &str) -> Result<String, McpError> {
-        let pending = self.pending_confirmations.lock().await.remove(code);
-        match pending {
-            Some((server, tool_name, args)) => {
-                if server.eq_ignore_ascii_case("playwright") {
-                    self.playwright.call_tool(&tool_name, args).await
-                } else {
-                    Ok(sanitize_as_passive_data(&format!(
-                        "Confirmed and executed {tool_name} with arguments {args}"
-                    )))
-                }
-            }
-            None => Err(McpError::Process(format!(
-                "Invalid or expired confirmation code: {code}"
-            ))),
+        let action = self
+            .confirmations
+            .verify_and_consume(code)
+            .map_err(|e| McpError::Process(e.to_string()))?;
+
+        if action.server.eq_ignore_ascii_case("playwright") {
+            self.playwright
+                .call_tool(&action.tool_name, action.arguments)
+                .await
+        } else {
+            Ok(sanitize_as_passive_data(&format!(
+                "Confirmed and executed {} with arguments {}",
+                action.tool_name, action.arguments
+            )))
         }
     }
 

@@ -77,6 +77,38 @@ impl TelegramAdapter {
         }
     }
 
+    pub fn with_confirmation_manager(
+        bot_token: String,
+        confirmation_mgr: ConfirmationManager,
+    ) -> Self {
+        let client = if bot_token.is_empty() {
+            Arc::new(TelegramClient::new("UNCONFIGURED".to_string()))
+        } else {
+            Arc::new(TelegramClient::new(bot_token))
+        };
+
+        let config = Arc::new(Mutex::new(load_remote_config()));
+        let pairing_mgr = PairingManager::new();
+        let task_mgr = TaskManager::new();
+        let audit_logger = AuditLogger::new(AuditLogger::default_path());
+        let rate_limiter = SenderRateLimiter::default();
+        let running = Arc::new(AtomicBool::new(false));
+        let last_command_time = Arc::new(Mutex::new(None));
+
+        Self {
+            client,
+            config,
+            pairing_mgr,
+            task_mgr,
+            confirmation_mgr,
+            audit_logger,
+            rate_limiter,
+            running,
+            last_command_time,
+            handler: Arc::new(Mutex::new(None)),
+        }
+    }
+
     pub fn with_components(
         client: Arc<TelegramClient>,
         config: Arc<Mutex<RemoteConfig>>,
@@ -584,6 +616,15 @@ impl TelegramAdapter {
         }
 
         Ok(Some(update_id))
+    }
+
+    /// Broadcasts an alert or notification to the paired Telegram user (if paired).
+    pub async fn broadcast_notification(&self, text: &str) -> Result<(), RemoteError> {
+        let paired_id = self.config.lock().ok().and_then(|c| c.paired_user_id);
+        if let Some(chat_id) = paired_id {
+            self.send_redacted_reply(chat_id, text).await?;
+        }
+        Ok(())
     }
 }
 

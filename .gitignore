@@ -22,8 +22,13 @@ id_rsa*
 data/
 *profile*/
 playwright-profile/
+playwright_profile/
 chrome_data/
 edge_data/
+workspace/
+*.db
+*.db-shm
+*.db-wal
 
 # Bulk acceptance test artifacts and outputs
 acceptance/canvas_rendered/
