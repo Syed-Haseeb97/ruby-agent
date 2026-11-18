@@ -26,6 +26,9 @@ pub use key_storage::{
 pub use power::{get_system_power_status, SystemPowerSummary};
 pub use r1_router::{PolicyDecision, PolicyGatedCommandHandler};
 pub use state_machine::TaskManager;
-pub use telegram::TelegramAdapter;
+pub use telegram::{
+    CapturedScreen, DefaultRemoteScreenCapturer, MockRemoteScreenCapturer, RemoteScreenCapturer,
+    TelegramAdapter,
+};
 pub use traits::{ChannelAdapter, NoopCommandHandler, RemoteCommandHandler};
 pub use types::{IncomingMessage, RemoteError, RemoteStatus, RemoteTask, TaskState};

@@ -217,16 +217,19 @@ pub struct RemoteTask {
 
 ---
 
-## 8. What Phase R1 and Phase R2 Will Need
+## 8. Status of Phase R1 and Phase R2 (Both Completed)
 
-### Phase R1: Tool Execution via `ruby-policy`
-- **Engine Interface**: `TaskManager` will dispatch `Running` tasks to `ruby-policy` instead of returning the R0 placeholder.
-- **Interactive Approval**: If a policy rule requires user escalation (`PolicyDecision::NeedsApproval`), the task moves to `NeedsInput`, generates a 4-digit code, and messages the user: `"Tool execution requires confirmation: Run `git push`? Reply /yes <code> or /no within 2 minutes."`
-- **Output Streaming**: Long-running command outputs will send progressive status updates to Telegram before final `Done`.
+### Phase R1: Tool Execution via `ruby-policy` (Completed)
+- **Engine Interface**: `TaskManager` dispatches tasks to `ruby-policy` and tool commands.
+- **Interactive Approval**: Consequential actions generate CSPRNG confirmation codes requiring `/yes <code>` or `/no`.
+- **Output Streaming**: Large outputs stream preview text and document uploads.
 
-### Phase R2: Screen Capture & Visual Verification
-- **File Attachment Pipeline**: `ChannelAdapter::send_file` will send `.png` desktop snapshots captured by `ruby-platform` via Telegram's `sendDocument` / `sendPhoto`.
-- **Command Addition**: `/screen` command to capture and send current multi-monitor screenshot to phone.
+### Phase R2: Screen Capture & Visual Verification (Completed)
+- **File Attachment Pipeline**: `ChannelAdapter::send_file` routes `.png`/`.jpg` desktop snapshots via Telegram's `sendPhoto` with automatic fallback to `sendDocument`.
+- **Command Addition**: `/screen` command captures and sends current multi-monitor screenshot to paired mobile devices.
+- **Security Guardrails**: Rejects capture on session lock, UAC / secure desktop elevation, and foreground window security denylists (1Password, Bitwarden, KeePass, banking portals).
+- **In-Memory Streaming**: Screen captures are held strictly in memory and never written to disk in the git repository tree.
+- **Documentation**: See `docs/R2_ACCEPTANCE.md` and `docs/R2_MANUAL_TESTING.md`.
 
 ---
 

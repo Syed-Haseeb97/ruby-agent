@@ -6,6 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use ruby_actions::computer_use::agent_loop::MockPlatformSecurityInspector;
+use ruby_actions::computer_use::executor::MockComputerUseExecutor;
 use ruby_gemini::dictation_client::redact_sensitive_content;
 use ruby_remote::audit::AuditLogger;
 use ruby_remote::confirmation::ConfirmationManager;
@@ -13,7 +15,10 @@ use ruby_remote::key_storage::{RemoteConfig, RemoteOffsetState};
 use ruby_remote::state_machine::TaskManager;
 use ruby_remote::telegram::client::TelegramClient;
 use ruby_remote::telegram::pairing::PairingManager;
-use ruby_remote::telegram::TelegramAdapter;
+use ruby_remote::telegram::{
+    DefaultRemoteScreenCapturer, MockRemoteScreenCapturer, RemoteScreenCapturer, TelegramAdapter,
+};
+use ruby_remote::traits::ChannelAdapter;
 use ruby_remote::types::TaskState;
 
 /// Helper to spin up a mock Telegram server on an ephemeral port.
@@ -22,6 +27,7 @@ struct MockTelegramServer {
     pub base_url: String,
     pub sent_messages: Arc<Mutex<Vec<serde_json::Value>>>,
     pub sent_documents: Arc<Mutex<Vec<String>>>,
+    pub sent_photos: Arc<Mutex<Vec<String>>>,
     pub updates_to_serve: Arc<Mutex<Vec<serde_json::Value>>>,
     pub get_updates_calls: Arc<AtomicUsize>,
 }
@@ -40,6 +46,9 @@ impl MockTelegramServer {
         let sent_documents = Arc::new(Mutex::new(Vec::new()));
         let sent_docs_clone = Arc::clone(&sent_documents);
 
+        let sent_photos = Arc::new(Mutex::new(Vec::new()));
+        let sent_photos_clone = Arc::clone(&sent_photos);
+
         let updates_to_serve = Arc::new(Mutex::new(Vec::new()));
         let updates_clone = Arc::clone(&updates_to_serve);
 
@@ -55,6 +64,7 @@ impl MockTelegramServer {
 
                 let sent_inner = Arc::clone(&sent_clone);
                 let sent_docs_inner = Arc::clone(&sent_docs_clone);
+                let sent_photos_inner = Arc::clone(&sent_photos_clone);
                 let updates_inner = Arc::clone(&updates_clone);
                 let calls_inner = Arc::clone(&calls_clone);
 
@@ -145,6 +155,19 @@ impl MockTelegramServer {
                                 );
                                 let _ = socket.write_all(http_resp.as_bytes()).await;
                                 let _ = socket.write_all(&resp_bytes).await;
+                            } else if header.contains("/sendPhoto") {
+                                sent_photos_inner.lock().unwrap().push(body_str.to_string());
+                                let resp = serde_json::json!({
+                                    "ok": true,
+                                    "result": { "message_id": 103 }
+                                });
+                                let resp_bytes = serde_json::to_vec(&resp).unwrap();
+                                let http_resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    resp_bytes.len()
+                                );
+                                let _ = socket.write_all(http_resp.as_bytes()).await;
+                                let _ = socket.write_all(&resp_bytes).await;
                             } else {
                                 let resp = serde_json::json!({ "ok": true, "result": {} });
                                 let resp_bytes = serde_json::to_vec(&resp).unwrap();
@@ -166,6 +189,7 @@ impl MockTelegramServer {
             base_url,
             sent_messages,
             sent_documents,
+            sent_photos,
             updates_to_serve,
             get_updates_calls,
         }
@@ -1109,6 +1133,415 @@ async fn test_telegram_background_job_commands_lifecycle() {
     let cancel_resp =
         ruby_core::tasks::handle_background_command(&supervisor, "/cancel", &j.id.to_string());
     assert!(cancel_resp.contains("cancelled"));
+}
+
+// 12. Phase R2: /screen command success sends photo and logs audit
+#[tokio::test]
+async fn test_telegram_screen_command_success() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let capturer = Arc::new(MockRemoteScreenCapturer::default());
+    adapter.set_screen_capturer(capturer);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 3001,
+        "message": {
+            "message_id": 501,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345, "first_name": "Owner" },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3001));
+
+    // Assert photo was dispatched to mock Telegram server
+    let photos = mock.sent_photos.lock().unwrap();
+    assert_eq!(photos.len(), 1, "Expected exactly 1 sendPhoto call");
+    assert!(photos[0].contains("screen.jpg"));
+    assert!(photos[0].contains("1920x1080"));
+
+    // Verify audit log
+    let audit_content = std::fs::read_to_string(&audit_file).unwrap();
+    assert!(audit_content.contains("cmd=screen"));
+    assert!(audit_content.contains("outcome=success"));
+}
+
+// 13. Phase R2: /screen refuses capture when Windows session is locked
+#[tokio::test]
+async fn test_telegram_screen_command_session_locked_refusal() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let mock_cap = MockRemoteScreenCapturer {
+        session_locked: true,
+        ..Default::default()
+    };
+    adapter.set_screen_capturer(Arc::new(mock_cap));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 3002,
+        "message": {
+            "message_id": 502,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3002));
+
+    // Zero photos sent
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
+
+    // Refusal reply sent
+    let msgs = mock.sent_messages.lock().unwrap();
+    assert_eq!(msgs.len(), 1);
+    let reply = msgs[0]["text"].as_str().unwrap();
+    assert!(reply.contains("Screen capture refused: Windows session is locked"));
+
+    // Audit log verifies refusal
+    let audit_content = std::fs::read_to_string(&audit_file).unwrap();
+    assert!(audit_content.contains("cmd=screen"));
+    assert!(audit_content.contains("outcome=refused_windows_session_is_locked"));
+}
+
+// 14. Phase R2: /screen refuses capture when elevated or secure desktop active
+#[tokio::test]
+async fn test_telegram_screen_command_elevated_or_secure_desktop_refusal() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let mock_cap = MockRemoteScreenCapturer {
+        elevated_or_secure_desktop: true,
+        ..Default::default()
+    };
+    adapter.set_screen_capturer(Arc::new(mock_cap));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 3003,
+        "message": {
+            "message_id": 503,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3003));
+
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
+
+    let msgs = mock.sent_messages.lock().unwrap();
+    let reply = msgs[0]["text"].as_str().unwrap();
+    assert!(reply.contains("Secure desktop or elevated process active"));
+}
+
+// 15. Phase R2: /screen refuses capture when foreground window is in security denylist
+#[tokio::test]
+async fn test_telegram_screen_command_denylist_refusal() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let mock_cap = MockRemoteScreenCapturer {
+        denylisted_window: true,
+        ..Default::default()
+    };
+    adapter.set_screen_capturer(Arc::new(mock_cap));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 3004,
+        "message": {
+            "message_id": 504,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3004));
+
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
+
+    let msgs = mock.sent_messages.lock().unwrap();
+    let reply = msgs[0]["text"].as_str().unwrap();
+    assert!(reply.contains("security denylist"));
+}
+
+// 16. Phase R2: /screen returns clean notification when capturer is uninitialized
+#[tokio::test]
+async fn test_telegram_screen_command_uninitialized() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+    // screen_capturer is None by default
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let update = serde_json::json!({
+        "update_id": 3005,
+        "message": {
+            "message_id": 505,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3005));
+
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
+
+    let msgs = mock.sent_messages.lock().unwrap();
+    let reply = msgs[0]["text"].as_str().unwrap();
+    assert!(reply.contains("Screen capture is not initialized"));
+}
+
+// 17. Phase R2: DefaultRemoteScreenCapturer hermetic verification of locks, elevation, and denylist
+#[tokio::test]
+async fn test_default_remote_screen_capturer_denylist_and_locks() {
+    let mock_executor = Arc::new(MockComputerUseExecutor::default());
+    let mock_inspector = Arc::new(MockPlatformSecurityInspector::default());
+    let capturer = DefaultRemoteScreenCapturer::new(
+        mock_executor.clone(),
+        mock_inspector.clone(),
+        vec!["CustomBank".into()],
+    );
+
+    // 1. Clean state -> Success
+    capturer.set_window_override("Visual Studio Code", "code.exe");
+    let res = capturer.capture_screen().await;
+    assert!(res.is_ok(), "Clean state must succeed: {:?}", res.err());
+    let captured = res.unwrap();
+    assert_eq!(captured.width, 1920);
+    assert_eq!(captured.height, 1080);
+    assert!(!captured.data.is_empty());
+
+    // 2. Denylisted window: built-in (1Password)
+    capturer.set_window_override("1Password - Vault", "1password.exe");
+    let res_denied_builtin = capturer.capture_screen().await;
+    assert!(res_denied_builtin.is_err());
+    assert!(res_denied_builtin
+        .unwrap_err()
+        .contains("security denylist"));
+
+    // 3. Denylisted window: custom entry (CustomBank)
+    capturer.set_window_override("My Bank Portal", "custombank.exe");
+    let res_denied_custom = capturer.capture_screen().await;
+    assert!(res_denied_custom.is_err());
+    assert!(res_denied_custom.unwrap_err().contains("security denylist"));
+
+    // 4. Session locked
+    capturer.set_window_override("Untitled - Notepad", "notepad.exe");
+    let locked_inspector = MockPlatformSecurityInspector {
+        session_locked: true,
+        ..Default::default()
+    };
+    let locked_capturer =
+        DefaultRemoteScreenCapturer::new(mock_executor.clone(), Arc::new(locked_inspector), vec![]);
+    locked_capturer.set_window_override("Untitled - Notepad", "notepad.exe");
+    let res_locked = locked_capturer.capture_screen().await;
+    assert!(res_locked.is_err());
+    assert!(res_locked
+        .unwrap_err()
+        .contains("Windows session is locked"));
+
+    // 5. Elevated / secure desktop
+    let elevated_inspector = MockPlatformSecurityInspector {
+        foreground_elevated: true,
+        ..Default::default()
+    };
+    let elevated_capturer =
+        DefaultRemoteScreenCapturer::new(mock_executor, Arc::new(elevated_inspector), vec![]);
+    elevated_capturer.set_window_override("Untitled - Notepad", "notepad.exe");
+    let res_elevated = elevated_capturer.capture_screen().await;
+    assert!(res_elevated.is_err());
+    assert!(res_elevated
+        .unwrap_err()
+        .contains("Secure desktop or elevated process active"));
+}
+
+// 18. Phase R2: ChannelAdapter::send_file routes images to send_photo and documents to send_document
+#[tokio::test]
+async fn test_channel_adapter_send_file_routes_images_to_send_photo() {
+    let mock = MockTelegramServer::start().await;
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(tempfile::tempdir().unwrap().path().join("audit.log")),
+    );
+
+    // Image file -> routes to send_photo
+    adapter
+        .send_file(12345, "preview.png", &[1, 2, 3], Some("Test Image"))
+        .await
+        .unwrap();
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 1);
+
+    // Non-image file -> routes to send_document
+    adapter
+        .send_file(12345, "report.pdf", &[4, 5, 6], Some("Test Document"))
+        .await
+        .unwrap();
+    assert_eq!(mock.sent_documents.lock().unwrap().len(), 1);
 }
 
 // 12. Opt-in live test: sends one message to paired chat and prints reply latency

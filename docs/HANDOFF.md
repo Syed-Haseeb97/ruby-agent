@@ -1,10 +1,10 @@
 # Ruby Assistant — Checkpoint & Milestone Handoff
 
 **Author**: Ruby Assistant Team  
-**Date**: 2026-11-18  
+**Date**: 2026-11-19  
 **Repository**: `Syed-Haseeb97/ruby-agent`  
-**Current Milestone**: M5 (Background Tasks / Mode B Supervisor) & V1 Voice Live Completed  
-**Next Milestone**: Ready for Production Deployment / User Validation
+**Current Milestone**: Phase R2 (Part D - Remote Screen Capture & Visual Verification) Completed  
+**Next Milestone**: Production Deployment & Live Mobile Validation
 
 ---
 
@@ -145,7 +145,34 @@ All Part A hardening items, Milestone M4 gaps, Milestone M5 Background Tasks (Mo
 
 ---
 
-## 5. Negative Invariants & Affirmation
+## 5. Phase R2 Deliverables: Remote Screen Capture & Visual Verification
+
+1. **Telegram `/screen` Command & Capture Pipeline**:
+   - On-demand mobile screen capture for paired Telegram devices.
+   - Dispatches in-memory JPEG captures via Telegram's `/sendPhoto` endpoint with automatic fallback to `sendDocument`.
+   - Verified via:
+     - `test_telegram_screen_command_success`
+     - `test_telegram_screen_command_uninitialized`
+     - `test_channel_adapter_send_file_routes_images_to_send_photo`
+
+2. **Security & Privacy Guardrails**:
+   - Refuses capture when Windows session is locked (`"❌ Screen capture refused: Windows session is locked."`).
+   - Refuses capture when UAC / secure desktop or elevated window is active (`"❌ Screen capture refused: Secure desktop or elevated process active."`).
+   - Refuses capture when foreground window matches password managers or financial portals (`"❌ Screen capture refused: Foreground window is protected by security denylist."`).
+   - Verified via:
+     - `test_telegram_screen_command_session_locked_refusal`
+     - `test_telegram_screen_command_elevated_or_secure_desktop_refusal`
+     - `test_telegram_screen_command_denylist_refusal`
+     - `test_default_remote_screen_capturer_denylist_and_locks`
+
+3. **In-Memory Streaming & Audit Integrity**:
+   - Screen bytes are held strictly in heap memory (`Vec<u8>`) and never written to disk in the git repository tree (Rule S1).
+   - Append-only security audit log records every capture attempt with sender and refusal reason.
+   - Desktop state in `ruby-desktop` wires `DefaultRemoteScreenCapturer` with `WindowsComputerUseExecutor`, `WindowsPlatformSecurityInspector`, and custom denylist from config.
+
+---
+
+## 6. Negative Invariants & Affirmation
 
 - **G3 Invariant**: Zero physical keyboard keystrokes, mouse moves, mouse clicks, screen captures, or clipboard reads/writes were dispatched or observed on physical hardware during automated test suites.
 - All tests executed hermetically using mock executors and memory capture.

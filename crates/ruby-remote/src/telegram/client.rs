@@ -170,4 +170,53 @@ impl TelegramClient {
 
         Ok(json_val)
     }
+
+    /// Sends a binary photo attachment to a chat id via Telegram's sendPhoto endpoint.
+    pub async fn send_photo(
+        &self,
+        chat_id: i64,
+        filename: &str,
+        data: &[u8],
+        caption: Option<&str>,
+    ) -> Result<serde_json::Value, RemoteError> {
+        let url = self.bot_url("sendPhoto");
+
+        let part = reqwest::multipart::Part::bytes(data.to_vec())
+            .file_name(filename.to_string())
+            .mime_str("image/jpeg")
+            .map_err(|e| RemoteError::Api(e.to_string()))?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part("photo", part);
+
+        if let Some(cap) = caption {
+            form = form.text("caption", cap.to_string());
+        }
+
+        let res = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| RemoteError::Network(e.to_string()))?;
+
+        let status = res.status();
+        if !status.is_success() {
+            let body = res.text().await.unwrap_or_default();
+            error!(
+                "Telegram sendPhoto failed with status {}: [REDACTED_BODY]",
+                status
+            );
+            return Err(RemoteError::Api(format!("Status {}: {}", status, body)));
+        }
+
+        let json_val = res
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| RemoteError::Api(e.to_string()))?;
+
+        Ok(json_val)
+    }
 }

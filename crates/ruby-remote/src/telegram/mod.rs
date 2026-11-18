@@ -3,6 +3,7 @@
 pub mod client;
 pub mod pairing;
 pub mod rate_limiter;
+pub mod screen;
 
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +27,9 @@ use crate::types::{RemoteError, RemoteStatus, TaskState};
 use self::client::TelegramClient;
 use self::pairing::{PairingManager, PairingResult};
 use self::rate_limiter::SenderRateLimiter;
+pub use self::screen::{
+    CapturedScreen, DefaultRemoteScreenCapturer, MockRemoteScreenCapturer, RemoteScreenCapturer,
+};
 
 pub const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4000;
 pub const STALENESS_THRESHOLD_SECS: u64 = 120;
@@ -45,6 +49,7 @@ pub struct TelegramAdapter {
     bg_supervisor: Arc<Mutex<Option<Arc<ruby_core::tasks::BackgroundTaskSupervisor>>>>,
     voice_live_mgr: Arc<Mutex<Option<Arc<ruby_core::voice_live::VoiceLiveManager>>>>,
     tool_mgr: Arc<Mutex<Option<Arc<ruby_mcp::PolicyGatedToolManager>>>>,
+    screen_capturer: Arc<Mutex<Option<Arc<dyn RemoteScreenCapturer>>>>,
 }
 
 impl TelegramAdapter {
@@ -84,7 +89,16 @@ impl TelegramAdapter {
             bg_supervisor: Arc::new(Mutex::new(None)),
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
+            screen_capturer: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_screen_capturer(&self, capturer: Arc<dyn RemoteScreenCapturer>) {
+        *self.screen_capturer.lock().unwrap() = Some(capturer);
+    }
+
+    pub fn screen_capturer(&self) -> Option<Arc<dyn RemoteScreenCapturer>> {
+        self.screen_capturer.lock().unwrap().clone()
     }
 
     pub fn set_voice_live_manager(&self, voice_live: Arc<ruby_core::voice_live::VoiceLiveManager>) {
@@ -137,6 +151,7 @@ impl TelegramAdapter {
             bg_supervisor: Arc::new(Mutex::new(None)),
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
+            screen_capturer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -165,6 +180,7 @@ impl TelegramAdapter {
             bg_supervisor: Arc::new(Mutex::new(None)),
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
+            screen_capturer: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -422,6 +438,7 @@ impl TelegramAdapter {
             "/help" => {
                 let help_text = "Ruby Assistant Remote (Mode A & Mode B Background)\n\n\
                 Available Commands:\n\
+                • /screen - Capture and receive current desktop screenshot\n\
                 • /do <task> - Start autonomous Mode A Computer Use desktop task\n\
                 • /jobs - List background tasks in Mode B queue\n\
                 • /job <id> - View detailed status of a background task\n\
@@ -444,6 +461,66 @@ impl TelegramAdapter {
                 self.audit_logger
                     .log_entry(sender_id, None, "help", "success");
                 self.send_redacted_reply(chat_id, help_text).await?;
+            }
+            "/screen" => {
+                let capturer_opt = self.screen_capturer.lock().unwrap().clone();
+                if let Some(capturer) = capturer_opt {
+                    match capturer.capture_screen().await {
+                        Ok(captured) => {
+                            self.audit_logger
+                                .log_entry(sender_id, None, "screen", "success");
+                            let caption = format!(
+                                "📸 Desktop Screenshot ({}x{})",
+                                captured.width, captured.height
+                            );
+                            let send_res = self
+                                .client
+                                .send_photo(chat_id, "screen.jpg", &captured.data, Some(&caption))
+                                .await;
+
+                            if send_res.is_err() {
+                                let doc_res = self
+                                    .client
+                                    .send_document(
+                                        chat_id,
+                                        "screen.jpg",
+                                        &captured.data,
+                                        Some(&caption),
+                                    )
+                                    .await;
+                                if let Err(e) = doc_res {
+                                    self.send_redacted_reply(
+                                        chat_id,
+                                        &format!("❌ Failed to send screenshot: {e}"),
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                        Err(reason) => {
+                            let sanitized_reason = reason.replace(' ', "_").to_lowercase();
+                            self.audit_logger.log_entry(
+                                sender_id,
+                                None,
+                                "screen",
+                                &format!("refused_{sanitized_reason}"),
+                            );
+                            self.send_redacted_reply(
+                                chat_id,
+                                &format!("❌ Screen capture refused: {reason}."),
+                            )
+                            .await?;
+                        }
+                    }
+                } else {
+                    self.audit_logger
+                        .log_entry(sender_id, None, "screen", "not_initialized");
+                    self.send_redacted_reply(
+                        chat_id,
+                        "❌ Screen capture is not initialized or computer use is unavailable.",
+                    )
+                    .await?;
+                }
             }
             "/jobs" => {
                 let reply = {
@@ -909,6 +986,16 @@ impl ChannelAdapter for TelegramAdapter {
         caption: Option<&str>,
     ) -> Result<(), RemoteError> {
         let cap_redacted = caption.map(|c| redact_sensitive_content(c, None));
+        let lower = filename.to_ascii_lowercase();
+        if (lower.ends_with(".jpg") || lower.ends_with(".jpeg") || lower.ends_with(".png"))
+            && self
+                .client
+                .send_photo(chat_id, filename, data, cap_redacted.as_deref())
+                .await
+                .is_ok()
+        {
+            return Ok(());
+        }
         self.client
             .send_document(chat_id, filename, data, cap_redacted.as_deref())
             .await?;

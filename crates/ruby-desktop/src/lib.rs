@@ -168,6 +168,22 @@ pub fn run() {
     ));
     remote_adapter.set_background_supervisor(Arc::clone(&bg_supervisor));
 
+    #[cfg(windows)]
+    {
+        let screen_executor = Arc::new(
+            ruby_actions::computer_use::WindowsComputerUseExecutor::new(false),
+        );
+        let security_inspector =
+            Arc::new(ruby_actions::computer_use::WindowsPlatformSecurityInspector);
+        let cu_cfg = ruby_config::ComputerUseConfig::load();
+        let capturer = Arc::new(ruby_remote::DefaultRemoteScreenCapturer::new(
+            screen_executor,
+            security_inspector,
+            cu_cfg.denylist,
+        ));
+        remote_adapter.set_screen_capturer(capturer);
+    }
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Arc::clone(&orb_state_ref),
         seq_counter: Arc::clone(&seq_counter_ref),

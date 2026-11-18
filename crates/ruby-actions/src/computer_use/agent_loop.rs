@@ -252,29 +252,36 @@ impl ComputerUseAgentLoop {
         if let Some(pair) = self.window_override.lock().unwrap().clone() {
             return pair;
         }
-        #[cfg(windows)]
-        {
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
-            unsafe {
-                let hwnd: HWND = GetForegroundWindow();
-                if hwnd.0.is_null() {
-                    return ("Unknown".into(), "unknown.exe".into());
-                }
-                let mut title_buf = [0u16; 512];
-                let len = GetWindowTextW(hwnd, &mut title_buf);
-                let title = String::from_utf16_lossy(&title_buf[..len as usize]);
-                let proc_name = ruby_platform::elevation_check::get_foreground_process_name()
-                    .unwrap_or_else(|| "active_process.exe".into());
-                (title, proc_name)
+        get_active_window_info()
+    }
+}
+
+/// Helper to get current foreground window title and process name safely on Windows or mock environments.
+pub fn get_active_window_info() -> (String, String) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+        unsafe {
+            let hwnd: HWND = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return ("Unknown".into(), "unknown.exe".into());
             }
-        }
-        #[cfg(not(windows))]
-        {
-            ("Test Desktop".into(), "test.exe".into())
+            let mut title_buf = [0u16; 512];
+            let len = GetWindowTextW(hwnd, &mut title_buf);
+            let title = String::from_utf16_lossy(&title_buf[..len as usize]);
+            let proc_name = ruby_platform::elevation_check::get_foreground_process_name()
+                .unwrap_or_else(|| "active_process.exe".into());
+            (title, proc_name)
         }
     }
+    #[cfg(not(windows))]
+    {
+        ("Test Desktop".into(), "test.exe".into())
+    }
+}
 
+impl ComputerUseAgentLoop {
     /// Executes the autonomous Mode A loop until completion, failure, or cancellation.
     pub async fn run(&self, goal: &str) -> TaskStatus {
         info!("Starting Mode A Computer Use Loop for goal: \"{}\"", goal);
