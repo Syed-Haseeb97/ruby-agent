@@ -826,9 +826,7 @@ mod tests {
         let priv_footer = format!("-----{} {}-----", "END", "RSA PRIVATE KEY");
         let priv_key = format!(
             "{}\n{}\n{}",
-            priv_header,
-            "MIIEowIBAAKCAQEA0mockkeydata1234567890",
-            priv_footer
+            priv_header, "MIIEowIBAAKCAQEA0mockkeydata1234567890", priv_footer
         );
         let aws_key = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
 
