@@ -98,7 +98,7 @@ mod tests {
         // Spawn a parent powershell process that spawns a child process and sleeps
         // cmd.exe /c start cmd.exe /c timeout 60
         let mut child = Command::new("powershell")
-            .args(&["-Command", "Start-Sleep -Seconds 60"])
+            .args(["-Command", "Start-Sleep -Seconds 60"])
             .spawn()
             .expect("Failed to spawn test process");
 
