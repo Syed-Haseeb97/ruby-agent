@@ -39,6 +39,8 @@ pub struct AppState {
     pub chat_session: Arc<tokio::sync::Mutex<ChatSession>>,
     pub tts_chain: Arc<TtsFallbackChain>,
     pub tts_playback: Arc<TtsPlaybackController>,
+    pub tool_manager: Arc<ruby_mcp::PolicyGatedToolManager>,
+    pub memory_store: Arc<dyn ruby_memory::MemoryStore>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -102,6 +104,25 @@ pub fn run() {
     let orb_state_ref = Arc::new(Mutex::new(OrbVisualState::default()));
     let seq_counter_ref = Arc::new(AtomicU64::new(1));
 
+    let tool_policy = Arc::new(
+        ruby_policy::DefaultToolSecurityPolicy::with_allowed_domains(vec![
+            "github.com".into(),
+            "*.github.com".into(),
+            "crates.io".into(),
+            "docs.rs".into(),
+        ]),
+    );
+    let sidecar_config = ruby_mcp::McpRegistry::default_playwright_config();
+    let sidecar = Arc::new(ruby_mcp::PlaywrightSidecarManager::new(sidecar_config));
+    let tool_manager = Arc::new(ruby_mcp::PolicyGatedToolManager::new(tool_policy, sidecar));
+
+    let db_path = ruby_memory::get_default_db_path();
+    let memory_store: Arc<dyn ruby_memory::MemoryStore> =
+        match ruby_memory::SqliteMemoryStore::open(&db_path) {
+            Ok(s) => Arc::new(s),
+            Err(_) => Arc::new(ruby_memory::SqliteMemoryStore::open_in_memory().unwrap()),
+        };
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Arc::clone(&orb_state_ref),
         seq_counter: Arc::clone(&seq_counter_ref),
@@ -111,6 +132,8 @@ pub fn run() {
         chat_session,
         tts_chain,
         tts_playback,
+        tool_manager,
+        memory_store,
     });
 
     #[cfg(feature = "test-capture")]
@@ -122,7 +145,13 @@ pub fn run() {
         commands::disconnect_remote,
         commands::send_chat_message,
         commands::cancel_speech,
-        commands::save_orb_snapshot
+        commands::save_orb_snapshot,
+        commands::execute_tool,
+        commands::confirm_tool_execution,
+        commands::add_memory,
+        commands::search_memories,
+        commands::delete_memory,
+        commands::wipe_all_memories
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -133,7 +162,13 @@ pub fn run() {
         commands::get_remote_status,
         commands::disconnect_remote,
         commands::send_chat_message,
-        commands::cancel_speech
+        commands::cancel_speech,
+        commands::execute_tool,
+        commands::confirm_tool_execution,
+        commands::add_memory,
+        commands::search_memories,
+        commands::delete_memory,
+        commands::wipe_all_memories
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);

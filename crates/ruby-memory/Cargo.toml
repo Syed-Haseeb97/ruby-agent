@@ -11,6 +11,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+keyring = "3"
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

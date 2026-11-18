@@ -20,6 +20,12 @@ pub enum PolicyError {
     SsrfBlocked(String),
     #[error("User rejected action or confirmation timed out: {0}")]
     ConfirmationDenied(String),
+    #[error("Tool execution blocked by security policy: {0}")]
+    ToolBlocked(String),
+    #[error("Unknown tool denied by default: {0}")]
+    UnknownToolDenied(String),
+    #[error("Domain blocked by security policy: {0}")]
+    DomainBlocked(String),
 }
 
 pub trait SecurityPolicy: Send + Sync {
@@ -248,6 +254,196 @@ impl SecurityPolicy for DefaultSecurityPolicy {
 #[async_trait::async_trait]
 pub trait ConfirmationBroker: Send + Sync {
     async fn request_confirmation(&self, action_description: &str) -> Result<bool, PolicyError>;
+}
+
+/// Security risk classifications for tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RiskClass {
+    ReadOnly,
+    Write,
+    Destructive,
+    ExternalNetwork,
+    Unknown,
+}
+
+pub trait ToolSecurityPolicy: Send + Sync {
+    fn classify_tool(&self, server: &str, tool_name: &str) -> RiskClass;
+    fn validate_tool_call(
+        &self,
+        server: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<RiskClass, PolicyError>;
+    fn validate_browser_url(&self, raw_url: &str) -> Result<url::Url, PolicyError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DefaultToolSecurityPolicy {
+    allowed_domains: Vec<String>,
+    tool_risk_overrides: std::collections::HashMap<String, RiskClass>,
+}
+
+impl DefaultToolSecurityPolicy {
+    pub fn new(
+        allowed_domains: Vec<String>,
+        tool_risk_overrides: std::collections::HashMap<String, RiskClass>,
+    ) -> Self {
+        Self {
+            allowed_domains,
+            tool_risk_overrides,
+        }
+    }
+
+    pub fn with_allowed_domains(allowed_domains: Vec<String>) -> Self {
+        Self {
+            allowed_domains,
+            tool_risk_overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
+    fn classify_tool(&self, server: &str, tool_name: &str) -> RiskClass {
+        let key = format!("{server}::{tool_name}");
+        if let Some(risk) = self.tool_risk_overrides.get(&key) {
+            return *risk;
+        }
+        if let Some(risk) = self.tool_risk_overrides.get(tool_name) {
+            return *risk;
+        }
+
+        let lower = tool_name.to_ascii_lowercase();
+
+        // 1. Destructive actions
+        if lower.contains("delete")
+            || lower.contains("remove")
+            || lower.contains("drop")
+            || lower.contains("purge")
+            || lower.contains("wipe")
+            || lower.contains("destroy")
+            || lower.contains("kill")
+        {
+            return RiskClass::Destructive;
+        }
+
+        // 2. Write actions
+        if lower.contains("write")
+            || lower.contains("create")
+            || lower.contains("update")
+            || lower.contains("set")
+            || lower.contains("edit")
+            || lower.contains("insert")
+            || lower.contains("add")
+            || lower.contains("modify")
+            || lower.contains("save")
+            || lower.contains("post")
+            || lower.contains("put")
+        {
+            return RiskClass::Write;
+        }
+
+        // 3. External Network & Browser Navigation
+        if lower.starts_with("navigate")
+            || lower.starts_with("goto")
+            || lower.starts_with("browse")
+            || lower.starts_with("fetch")
+            || lower.starts_with("download")
+            || lower.starts_with("request")
+            || lower.starts_with("open_url")
+            || server.eq_ignore_ascii_case("playwright")
+        {
+            return RiskClass::ExternalNetwork;
+        }
+
+        // 4. Read-only actions
+        if lower.contains("read")
+            || lower.contains("list")
+            || lower.contains("get")
+            || lower.contains("search")
+            || lower.contains("query")
+            || lower.contains("inspect")
+            || lower.contains("find")
+            || lower.contains("check")
+            || lower.contains("status")
+            || lower.contains("view")
+            || lower.contains("info")
+        {
+            return RiskClass::ReadOnly;
+        }
+
+        RiskClass::Unknown
+    }
+
+    fn validate_tool_call(
+        &self,
+        server: &str,
+        tool_name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<RiskClass, PolicyError> {
+        let risk = self.classify_tool(server, tool_name);
+        if risk == RiskClass::Unknown {
+            return Err(PolicyError::UnknownToolDenied(format!(
+                "Tool '{tool_name}' on server '{server}' is not recognized and is denied by default"
+            )));
+        }
+
+        // If tool takes a URL parameter, validate it against SSRF and allowed domains
+        if let Some(url_val) = arguments.get("url").and_then(|u| u.as_str()) {
+            let _ = self.validate_browser_url(url_val)?;
+        }
+
+        Ok(risk)
+    }
+
+    fn validate_browser_url(&self, raw_url: &str) -> Result<url::Url, PolicyError> {
+        let parsed = url::Url::parse(raw_url)
+            .map_err(|e| PolicyError::SsrfBlocked(format!("Invalid URL syntax: {e}")))?;
+
+        let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
+
+        // 1. SSRF prevention: forbid local, link-local, loopback, internal
+        if host == "localhost"
+            || host == "127.0.0.1"
+            || host == "::1"
+            || host == "169.254.169.254"
+            || host.ends_with(".internal")
+            || host.ends_with(".local")
+        {
+            return Err(PolicyError::SsrfBlocked(host));
+        }
+
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => {
+                    if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                        return Err(PolicyError::SsrfBlocked(host));
+                    }
+                }
+                std::net::IpAddr::V6(v6) => {
+                    if v6.is_loopback() {
+                        return Err(PolicyError::SsrfBlocked(host));
+                    }
+                }
+            }
+        }
+
+        // 2. Domain allowlist check (if configured)
+        if !self.allowed_domains.is_empty() {
+            let matches_allowed = self.allowed_domains.iter().any(|domain| {
+                let d = domain.to_ascii_lowercase();
+                if let Some(suffix) = d.strip_prefix("*.") {
+                    host == suffix || host.ends_with(&format!(".{suffix}"))
+                } else {
+                    host == d || host.ends_with(&format!(".{d}"))
+                }
+            });
+            if !matches_allowed {
+                return Err(PolicyError::DomainBlocked(host));
+            }
+        }
+
+        Ok(parsed)
+    }
 }
 
 #[cfg(test)]
@@ -496,5 +692,72 @@ mod tests {
         assert!(policy
             .validate_url(&url::Url::parse("https://api.github.com/repos").unwrap())
             .is_ok());
+    }
+
+    #[test]
+    fn test_tool_security_policy_classification_and_default_deny() {
+        let policy = DefaultToolSecurityPolicy::with_allowed_domains(vec![
+            "github.com".into(),
+            "*.github.com".into(),
+        ]);
+
+        // 1. Read-only tools
+        assert_eq!(policy.classify_tool("fs", "read_file"), RiskClass::ReadOnly);
+        assert_eq!(
+            policy.classify_tool("mcp", "list_directory"),
+            RiskClass::ReadOnly
+        );
+        assert_eq!(
+            policy.classify_tool("db", "search_items"),
+            RiskClass::ReadOnly
+        );
+
+        // 2. Write tools
+        assert_eq!(policy.classify_tool("fs", "write_file"), RiskClass::Write);
+        assert_eq!(
+            policy.classify_tool("mcp", "create_issue"),
+            RiskClass::Write
+        );
+
+        // 3. Destructive tools
+        assert_eq!(
+            policy.classify_tool("fs", "delete_file"),
+            RiskClass::Destructive
+        );
+        assert_eq!(
+            policy.classify_tool("db", "purge_records"),
+            RiskClass::Destructive
+        );
+
+        // 4. External network & playwright
+        assert_eq!(
+            policy.classify_tool("playwright", "page_navigate"),
+            RiskClass::ExternalNetwork
+        );
+        assert_eq!(
+            policy.classify_tool("http", "fetch_data"),
+            RiskClass::ExternalNetwork
+        );
+
+        // 5. Unknown tool -> default deny
+        let unknown = policy.classify_tool("shell", "eval_custom_command");
+        assert_eq!(unknown, RiskClass::Unknown);
+        let res = policy.validate_tool_call("shell", "eval_custom_command", &serde_json::json!({}));
+        assert!(matches!(res, Err(PolicyError::UnknownToolDenied(_))));
+
+        // 6. Domain allowlist on URL
+        let allowed_args = serde_json::json!({ "url": "https://api.github.com/v1" });
+        assert!(policy
+            .validate_tool_call("playwright", "navigate", &allowed_args)
+            .is_ok());
+
+        let blocked_domain_args = serde_json::json!({ "url": "https://evil-hacker.com/steal" });
+        let blocked_res = policy.validate_tool_call("playwright", "navigate", &blocked_domain_args);
+        assert!(matches!(blocked_res, Err(PolicyError::DomainBlocked(_))));
+
+        // 7. SSRF blocked on URL
+        let ssrf_args = serde_json::json!({ "url": "http://127.0.0.1:8080/admin" });
+        let ssrf_res = policy.validate_tool_call("playwright", "navigate", &ssrf_args);
+        assert!(matches!(ssrf_res, Err(PolicyError::SsrfBlocked(_))));
     }
 }

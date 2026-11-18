@@ -102,7 +102,88 @@ pub async fn send_chat_message(
     message: String,
     _tts_engine: Option<String>,
 ) -> Result<ChatTurnResult, String> {
-    // 1. Set Orb state to Thinking with spin active
+    let trimmed = message.trim();
+
+    // 1. Tool confirmation shortcut: /yes <code>
+    if let Some(code) = trimmed.strip_prefix("/yes ") {
+        let code = code.trim();
+        let res = state.tool_manager.confirm_and_execute(code).await;
+        let reply_text = match res {
+            Ok(output) => format!("✅ Tool confirmed and executed:\n{output}"),
+            Err(e) => format!("❌ Confirmation failed: {e}"),
+        };
+        {
+            let mut orb = state.orb_state.lock().unwrap();
+            orb.operational = OperationalState::Speaking;
+            orb.emotion = Emotion::Neutral;
+            orb.thinking_spin_active = false;
+            orb.speaking_active = true;
+            let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+        }
+        return Ok(ChatTurnResult {
+            response_text: reply_text,
+            emotion: Emotion::Neutral,
+            served_backend: "tool_execution".into(),
+            tts_engine: "none".into(),
+        });
+    }
+
+    // 2. Memory shortcuts: remember <fact> / store <fact>
+    if let Some(fact) = trimmed
+        .strip_prefix("remember ")
+        .or_else(|| trimmed.strip_prefix("store "))
+    {
+        let fact = fact.trim();
+        let reply_text = match state.memory_store.add_memory("fact", fact) {
+            Ok(id) => format!("✅ Saved to memory [ID: {id}]: {fact}"),
+            Err(e) => format!("❌ Memory storage refused: {e}"),
+        };
+        {
+            let mut orb = state.orb_state.lock().unwrap();
+            orb.operational = OperationalState::Speaking;
+            orb.emotion = Emotion::Happy;
+            orb.thinking_spin_active = false;
+            orb.speaking_active = true;
+            let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+        }
+        return Ok(ChatTurnResult {
+            response_text: reply_text,
+            emotion: Emotion::Happy,
+            served_backend: "memory_store".into(),
+            tts_engine: "none".into(),
+        });
+    }
+
+    // 3. Memory recall: recall <query> / search memory <query>
+    if let Some(query) = trimmed
+        .strip_prefix("recall ")
+        .or_else(|| trimmed.strip_prefix("search memory "))
+    {
+        let query = query.trim();
+        let reply_text = match state.memory_store.search_memories(query, 5) {
+            Ok(entries) => ruby_memory::format_memories_as_passive_data(&entries),
+            Err(e) => format!("❌ Memory search failed: {e}"),
+        };
+        {
+            let mut orb = state.orb_state.lock().unwrap();
+            orb.operational = OperationalState::Speaking;
+            orb.emotion = Emotion::Curious;
+            orb.thinking_spin_active = false;
+            orb.speaking_active = true;
+            let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+        }
+        return Ok(ChatTurnResult {
+            response_text: reply_text,
+            emotion: Emotion::Curious,
+            served_backend: "memory_search".into(),
+            tts_engine: "none".into(),
+        });
+    }
+
+    // 4. Set Orb state to Thinking with spin active
     {
         let mut orb = state.orb_state.lock().unwrap();
         orb.operational = OperationalState::Thinking;
@@ -111,7 +192,7 @@ pub async fn send_chat_message(
         let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
     }
 
-    // 2. Multi-turn LLM chat call
+    // 5. Multi-turn LLM chat call
     let history: Vec<ruby_gemini::ChatMessage> = {
         let mut session = state.chat_session.lock().await;
         session.add_message(ruby_core::chat::ChatMessage::user(&message));
@@ -222,6 +303,100 @@ pub fn cancel_speech(app: AppHandle, state: State<'_, AppState>) -> Result<(), S
     let seq = state.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
     let _ = app.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
     Ok(())
+}
+
+#[tauri::command]
+pub async fn execute_tool(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: String,
+    tool_name: String,
+    arguments: serde_json::Value,
+) -> Result<String, String> {
+    let res = state
+        .tool_manager
+        .execute_tool(&server, &tool_name, arguments)
+        .await;
+    match res {
+        Ok(output) => {
+            let _ = app.emit(
+                "tool_executed",
+                serde_json::json!({
+                    "server": server,
+                    "tool_name": tool_name,
+                    "output": output
+                }),
+            );
+            Ok(output)
+        }
+        Err(ruby_mcp::McpError::RequiresConfirmation {
+            code,
+            tool_name,
+            description,
+        }) => {
+            let _ = app.emit(
+                "tool_confirmation_requested",
+                serde_json::json!({
+                    "code": code,
+                    "tool_name": tool_name,
+                    "description": description
+                }),
+            );
+            Err(format!(
+                "⚠️ Tool execution requires confirmation: {description}.\nReply /yes {code} or /no within 120 seconds."
+            ))
+        }
+        Err(e) => Err(format!("Tool execution error: {e}")),
+    }
+}
+
+#[tauri::command]
+pub async fn confirm_tool_execution(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<String, String> {
+    state
+        .tool_manager
+        .confirm_and_execute(&code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn add_memory(
+    state: State<'_, AppState>,
+    category: String,
+    text: String,
+) -> Result<i64, String> {
+    state
+        .memory_store
+        .add_memory(&category, &text)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn search_memories(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ruby_memory::MemoryEntry>, String> {
+    state
+        .memory_store
+        .search_memories(&query, limit.unwrap_or(10))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_memory(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
+    state
+        .memory_store
+        .delete_memory(id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn wipe_all_memories(state: State<'_, AppState>) -> Result<usize, String> {
+    state.memory_store.wipe_all().map_err(|e| e.to_string())
 }
 
 #[cfg(feature = "test-capture")]
