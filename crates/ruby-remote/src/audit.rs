@@ -5,7 +5,7 @@
 use chrono::Utc;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -26,10 +26,17 @@ impl AuditLogger {
     }
 
     pub fn default_path() -> PathBuf {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| "D:\\projects\\ruby-agent".to_string());
-        Path::new(&home).join(".ruby").join("remote_audit.log")
+        let base = if let Ok(custom) = std::env::var("RUBY_DATA_DIR") {
+            PathBuf::from(custom)
+        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            PathBuf::from(local_app_data).join("Ruby")
+        } else {
+            let home = std::env::var("USERPROFILE")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".ruby")
+        };
+        base.join("remote_audit.log")
     }
 
     /// Records an audit log entry.

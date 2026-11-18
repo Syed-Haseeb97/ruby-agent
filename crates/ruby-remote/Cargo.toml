@@ -11,6 +11,7 @@ ruby-config.workspace = true
 ruby-gemini.workspace = true
 ruby-policy.workspace = true
 ruby-actions.workspace = true
+ruby-mcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { workspace = true, features = ["multipart", "json"] }

@@ -454,6 +454,12 @@ pub trait ToolSecurityPolicy: Send + Sync {
         arguments: &serde_json::Value,
     ) -> Result<RiskClass, PolicyError>;
     fn validate_browser_url(&self, raw_url: &str) -> Result<url::Url, PolicyError>;
+    fn validate_all_urls_in_json(&self, val: &serde_json::Value) -> Result<(), PolicyError>;
+    fn revalidate_redirect_url(
+        &self,
+        original_url: &url::Url,
+        redirect_target: &str,
+    ) -> Result<url::Url, PolicyError>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -491,66 +497,78 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
             return *risk;
         }
 
-        let lower = tool_name.to_ascii_lowercase();
+        // Explicit per-tool risk table (server::tool -> RiskClass). No substring matching!
+        match (
+            server.to_ascii_lowercase().as_str(),
+            tool_name.to_ascii_lowercase().as_str(),
+        ) {
+            // Playwright tools
+            ("playwright", "navigate") | ("playwright", "goto") | ("playwright", "open_url") => {
+                RiskClass::ExternalNetwork
+            }
+            ("playwright", "screenshot")
+            | ("playwright", "get_content")
+            | ("playwright", "get_title")
+            | ("playwright", "get_url") => RiskClass::ReadOnly,
+            ("playwright", "click")
+            | ("playwright", "type")
+            | ("playwright", "fill")
+            | ("playwright", "upload")
+            | ("playwright", "submit") => RiskClass::Write,
+            ("playwright", "evaluate") => RiskClass::Destructive,
 
-        // 1. Destructive actions
-        if lower.contains("delete")
-            || lower.contains("remove")
-            || lower.contains("drop")
-            || lower.contains("purge")
-            || lower.contains("wipe")
-            || lower.contains("destroy")
-            || lower.contains("kill")
-        {
-            return RiskClass::Destructive;
+            // Memory tools
+            ("memory", "search_memories") | ("memory", "get_recent_memories") => {
+                RiskClass::ReadOnly
+            }
+            ("memory", "store_memory") => RiskClass::Write,
+            ("memory", "delete_memory") | ("memory", "wipe_all") => RiskClass::Destructive,
+
+            // Filesystem tools
+            ("fs", "read_file") | ("fs", "list_directory") | ("fs", "file_info") => {
+                RiskClass::ReadOnly
+            }
+            ("fs", "write_file") | ("fs", "create_dir") => RiskClass::Write,
+            ("fs", "delete_file") => RiskClass::Destructive,
+
+            // Git tools
+            ("git", "status") | ("git", "diff") | ("git", "log") => RiskClass::ReadOnly,
+            ("git", "commit") => RiskClass::Write,
+            ("git", "push") => RiskClass::Destructive,
+
+            // Actions & Remote tools
+            ("actions", "open_file")
+            | ("actions", "send_file")
+            | ("actions", "list_folder")
+            | ("actions", "file_info") => RiskClass::ReadOnly,
+            ("actions", "launch_app")
+            | ("actions", "screen_click")
+            | ("actions", "change_setting") => RiskClass::Write,
+
+            // Computer use tools
+            ("computer_use", "screenshot") | ("computer_use", "mouse_move") => RiskClass::ReadOnly,
+            ("computer_use", "left_click")
+            | ("computer_use", "right_click")
+            | ("computer_use", "double_click")
+            | ("computer_use", "type_text")
+            | ("computer_use", "press_key")
+            | ("computer_use", "drag") => RiskClass::Write,
+
+            // Shell tool (when explicitly requested through tool layer)
+            ("shell", "execute_command") => RiskClass::Write,
+
+            // Voice live tools (direct dispatch)
+            ("voice_live", "list_folder")
+            | ("voice_live", "read_file")
+            | ("voice_live", "search_memories") => RiskClass::ReadOnly,
+            ("voice_live", "delete_file") | ("voice_live", "wipe_all") => RiskClass::Destructive,
+            ("voice_live", "launch_app")
+            | ("voice_live", "store_memory")
+            | ("voice_live", "write_file") => RiskClass::Write,
+
+            // Unknown tools are denied by default (no substring fallback)
+            _ => RiskClass::Unknown,
         }
-
-        // 2. Write actions
-        if lower.contains("write")
-            || lower.contains("create")
-            || lower.contains("update")
-            || lower.contains("set")
-            || lower.contains("edit")
-            || lower.contains("insert")
-            || lower.contains("add")
-            || lower.contains("modify")
-            || lower.contains("save")
-            || lower.contains("post")
-            || lower.contains("put")
-        {
-            return RiskClass::Write;
-        }
-
-        // 3. External Network & Browser Navigation
-        if lower.starts_with("navigate")
-            || lower.starts_with("goto")
-            || lower.starts_with("browse")
-            || lower.starts_with("fetch")
-            || lower.starts_with("download")
-            || lower.starts_with("request")
-            || lower.starts_with("open_url")
-            || server.eq_ignore_ascii_case("playwright")
-        {
-            return RiskClass::ExternalNetwork;
-        }
-
-        // 4. Read-only actions
-        if lower.contains("read")
-            || lower.contains("list")
-            || lower.contains("get")
-            || lower.contains("search")
-            || lower.contains("query")
-            || lower.contains("inspect")
-            || lower.contains("find")
-            || lower.contains("check")
-            || lower.contains("status")
-            || lower.contains("view")
-            || lower.contains("info")
-        {
-            return RiskClass::ReadOnly;
-        }
-
-        RiskClass::Unknown
     }
 
     fn validate_tool_call(
@@ -562,16 +580,62 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
         let risk = self.classify_tool(server, tool_name);
         if risk == RiskClass::Unknown {
             return Err(PolicyError::UnknownToolDenied(format!(
-                "Tool '{tool_name}' on server '{server}' is not recognized and is denied by default"
+                "Tool '{tool_name}' on server '{server}' is not recognized in explicit risk table and is denied by default"
             )));
         }
 
-        // If tool takes a URL parameter, validate it against SSRF and allowed domains
-        if let Some(url_val) = arguments.get("url").and_then(|u| u.as_str()) {
-            let _ = self.validate_browser_url(url_val)?;
-        }
+        // Validate every url-like argument in the JSON payload (keys or values)
+        self.validate_all_urls_in_json(arguments)?;
 
         Ok(risk)
+    }
+
+    /// Recursively validates every URL-like string found in tool call arguments.
+    fn validate_all_urls_in_json(&self, val: &serde_json::Value) -> Result<(), PolicyError> {
+        match val {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    let k_lower = k.to_ascii_lowercase();
+                    if k_lower.contains("url")
+                        || k_lower.contains("uri")
+                        || k_lower.contains("endpoint")
+                        || k_lower.contains("target")
+                        || k_lower.contains("redirect")
+                        || k_lower.contains("href")
+                        || k_lower.contains("link")
+                    {
+                        if let Some(s) = v.as_str() {
+                            let _ = self.validate_browser_url(s)?;
+                        }
+                    } else if let Some(s) = v.as_str() {
+                        if s.starts_with("http://")
+                            || s.starts_with("https://")
+                            || s.starts_with("ws://")
+                            || s.starts_with("wss://")
+                        {
+                            let _ = self.validate_browser_url(s)?;
+                        }
+                    }
+                    self.validate_all_urls_in_json(v)?;
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    if let Some(s) = v.as_str() {
+                        if s.starts_with("http://")
+                            || s.starts_with("https://")
+                            || s.starts_with("ws://")
+                            || s.starts_with("wss://")
+                        {
+                            let _ = self.validate_browser_url(s)?;
+                        }
+                    }
+                    self.validate_all_urls_in_json(v)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn validate_browser_url(&self, raw_url: &str) -> Result<url::Url, PolicyError> {
@@ -584,27 +648,29 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
             return Err(PolicyError::SsrfBlocked("Empty host in URL".into()));
         }
 
-        if host == "localhost"
-            || host == "0.0.0.0"
-            || host == "127.0.0.1"
-            || host == "::1"
-            || host == "169.254.169.254"
-            || host.ends_with(".localhost")
-            || host.ends_with(".local")
-            || host.ends_with(".internal")
-            || host.ends_with(".arpa")
+        let clean_host = host.trim_matches(|c| c == '[' || c == ']');
+
+        if clean_host == "localhost"
+            || clean_host == "0.0.0.0"
+            || clean_host == "127.0.0.1"
+            || clean_host == "::1"
+            || clean_host == "169.254.169.254"
+            || clean_host.ends_with(".localhost")
+            || clean_host.ends_with(".local")
+            || clean_host.ends_with(".internal")
+            || clean_host.ends_with(".arpa")
         {
             return Err(PolicyError::SsrfBlocked(host));
         }
 
-        if let Some(ip) = parse_ip_or_numeric_host(&host) {
+        if let Some(ip) = parse_ip_or_numeric_host(clean_host) {
             if is_blocked_ip(ip) {
                 return Err(PolicyError::SsrfBlocked(format!("{host} (parsed as {ip})")));
             }
         }
 
         let port = parsed.port_or_known_default().unwrap_or(80);
-        if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
+        if let Ok(addrs) = (clean_host, port).to_socket_addrs() {
             for addr in addrs {
                 if is_blocked_ip(addr.ip()) {
                     return Err(PolicyError::SsrfBlocked(format!(
@@ -620,9 +686,9 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
             let matches_allowed = self.allowed_domains.iter().any(|domain| {
                 let d = domain.to_ascii_lowercase();
                 if let Some(suffix) = d.strip_prefix("*.") {
-                    host == suffix || host.ends_with(&format!(".{suffix}"))
+                    clean_host == suffix || clean_host.ends_with(&format!(".{suffix}"))
                 } else {
-                    host == d || host.ends_with(&format!(".{d}"))
+                    clean_host == d || clean_host.ends_with(&format!(".{d}"))
                 }
             });
             if !matches_allowed {
@@ -631,6 +697,15 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
         }
 
         Ok(parsed)
+    }
+
+    /// Re-validates a redirect URL against SSRF policy rules.
+    fn revalidate_redirect_url(
+        &self,
+        _original_url: &url::Url,
+        redirect_target: &str,
+    ) -> Result<url::Url, PolicyError> {
+        self.validate_browser_url(redirect_target)
     }
 }
 
@@ -1060,56 +1135,67 @@ mod tests {
 
     #[test]
     fn test_tool_security_policy_classification_and_default_deny() {
-        let policy = DefaultToolSecurityPolicy::with_allowed_domains(vec![
-            "github.com".into(),
-            "*.github.com".into(),
-        ]);
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert("custom::my_reader".to_string(), RiskClass::ReadOnly);
+        overrides.insert("custom::my_writer".to_string(), RiskClass::Write);
 
-        // 1. Read-only tools
+        let policy = DefaultToolSecurityPolicy::new(
+            vec!["github.com".into(), "*.github.com".into()],
+            overrides,
+        );
+
+        // 1. Explicit risk table matches
         assert_eq!(policy.classify_tool("fs", "read_file"), RiskClass::ReadOnly);
         assert_eq!(
-            policy.classify_tool("mcp", "list_directory"),
+            policy.classify_tool("fs", "list_directory"),
             RiskClass::ReadOnly
         );
         assert_eq!(
-            policy.classify_tool("db", "search_items"),
+            policy.classify_tool("memory", "search_memories"),
             RiskClass::ReadOnly
         );
-
-        // 2. Write tools
         assert_eq!(policy.classify_tool("fs", "write_file"), RiskClass::Write);
-        assert_eq!(
-            policy.classify_tool("mcp", "create_issue"),
-            RiskClass::Write
-        );
-
-        // 3. Destructive tools
         assert_eq!(
             policy.classify_tool("fs", "delete_file"),
             RiskClass::Destructive
         );
         assert_eq!(
-            policy.classify_tool("db", "purge_records"),
+            policy.classify_tool("playwright", "navigate"),
+            RiskClass::ExternalNetwork
+        );
+        assert_eq!(
+            policy.classify_tool("playwright", "evaluate"),
             RiskClass::Destructive
         );
 
-        // 4. External network & playwright
+        // 2. Config override entries match
         assert_eq!(
-            policy.classify_tool("playwright", "page_navigate"),
-            RiskClass::ExternalNetwork
+            policy.classify_tool("custom", "my_reader"),
+            RiskClass::ReadOnly
         );
         assert_eq!(
-            policy.classify_tool("http", "fetch_data"),
-            RiskClass::ExternalNetwork
+            policy.classify_tool("custom", "my_writer"),
+            RiskClass::Write
         );
 
-        // 5. Unknown tool -> default deny
-        let unknown = policy.classify_tool("shell", "eval_custom_command");
-        assert_eq!(unknown, RiskClass::Unknown);
+        // 3. Unknown tools default to Unknown (no substring fallback)
+        assert_eq!(
+            policy.classify_tool("mcp", "list_directory"),
+            RiskClass::Unknown
+        );
+        assert_eq!(
+            policy.classify_tool("db", "search_items"),
+            RiskClass::Unknown
+        );
+        assert_eq!(
+            policy.classify_tool("shell", "eval_custom_command"),
+            RiskClass::Unknown
+        );
+
         let res = policy.validate_tool_call("shell", "eval_custom_command", &serde_json::json!({}));
         assert!(matches!(res, Err(PolicyError::UnknownToolDenied(_))));
 
-        // 6. Domain allowlist on URL
+        // 4. Domain allowlist on URL
         let allowed_args = serde_json::json!({ "url": "https://api.github.com/v1" });
         assert!(policy
             .validate_tool_call("playwright", "navigate", &allowed_args)

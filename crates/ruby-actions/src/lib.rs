@@ -108,23 +108,40 @@ impl AllowlistedActionExecutor {
     }
 
     /// Executes a command with timeout and caps output length to 64 KB.
+    /// Uses Windows Job Object to guarantee the entire process tree is terminated on timeout.
     pub async fn run_command_with_timeout_and_cap(
         mut cmd: std::process::Command,
         desc: &str,
     ) -> Result<String, ActionError> {
-        let output = tokio::time::timeout(
-            Self::GIT_EXECUTION_TIMEOUT,
-            tokio::task::spawn_blocking(move || cmd.output()),
-        )
-        .await
-        .map_err(|_| {
-            ActionError::Failed(format!(
-                "{desc} timed out after {:?}",
-                Self::GIT_EXECUTION_TIMEOUT
-            ))
-        })?
-        .map_err(|e| ActionError::Failed(format!("Failed to join task for {desc}: {e}")))?
-        .map_err(|e| ActionError::Failed(format!("{desc} failed to launch: {e}")))?;
+        use std::os::windows::io::AsRawHandle;
+        let job = ruby_platform::JobObjectProcessTree::new().ok();
+
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| ActionError::Failed(format!("{desc} failed to launch: {e}")))?;
+
+        if let Some(ref j) = job {
+            let _ = j.assign_process(child.as_raw_handle());
+        }
+
+        let wait_fut = tokio::task::spawn_blocking(move || child.wait_with_output());
+
+        let output = match tokio::time::timeout(Self::GIT_EXECUTION_TIMEOUT, wait_fut).await {
+            Ok(join_res) => join_res
+                .map_err(|e| ActionError::Failed(format!("Failed to join task for {desc}: {e}")))?
+                .map_err(|e| ActionError::Failed(format!("{desc} failed: {e}")))?,
+            Err(_) => {
+                if let Some(ref j) = job {
+                    let _ = j.kill_tree();
+                }
+                return Err(ActionError::Failed(format!(
+                    "{desc} timed out after {:?} (process tree killed)",
+                    Self::GIT_EXECUTION_TIMEOUT
+                )));
+            }
+        };
 
         let mut stdout_bytes = output.stdout;
         let is_truncated = if stdout_bytes.len() > Self::MAX_COMMAND_OUTPUT_BYTES {

@@ -722,6 +722,43 @@ pub fn redact_sensitive_content(input: &str, known_key: Option<&str>) -> String 
     out = BOT_TOKEN_RE
         .replace_all(&out, "[REDACTED_API_KEY]")
         .to_string();
+
+    // Redact GitHub Personal Access Tokens (ghp_ and github_pat_)
+    static GITHUB_TOKEN_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b").unwrap()
+    });
+    out = GITHUB_TOKEN_RE
+        .replace_all(&out, "[REDACTED_API_KEY]")
+        .to_string();
+
+    // Redact Bearer tokens
+    static BEARER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\bBearer\s+[A-Za-z0-9\-\._~\+\/]+=*").unwrap()
+    });
+    out = BEARER_RE
+        .replace_all(&out, "Bearer [REDACTED_API_KEY]")
+        .to_string();
+
+    // Redact Private Key blocks (PEM)
+    static PRIVATE_KEY_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        )
+        .unwrap()
+    });
+    out = PRIVATE_KEY_RE
+        .replace_all(&out, "[REDACTED_PRIVATE_KEY]")
+        .to_string();
+
+    // Redact AWS-style keys
+    static AWS_KEY_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\b(AKIA[0-9A-Z]{16}|aws_secret_access_key\s*=\s*[A-Za-z0-9/+=]{40})\b")
+            .unwrap()
+    });
+    out = AWS_KEY_RE
+        .replace_all(&out, "[REDACTED_API_KEY]")
+        .to_string();
+
     out
 }
 
@@ -769,6 +806,48 @@ mod tests {
             !url.contains(fake_key),
             "URL must never contain the API key"
         );
+    }
+
+    #[test]
+    fn test_secret_filters_comprehensive_classes() {
+        // Built strictly via string concatenation to avoid hardcoding secrets in source
+        let ghp = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz12");
+        let pat = format!(
+            "{}{}",
+            "github_pat_",
+            "11ABCD_1234567890abcdefghijklmnopqrstuvwxyz1234567890abcdefghijklmnopqrstuvwxyz12"
+        );
+        let bearer = format!(
+            "{} {}",
+            "Bearer",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M"
+        );
+        let priv_header = format!("-----{} {}-----", "BEGIN", "RSA PRIVATE KEY");
+        let priv_footer = format!("-----{} {}-----", "END", "RSA PRIVATE KEY");
+        let priv_key = format!(
+            "{}\n{}\n{}",
+            priv_header,
+            "MIIEowIBAAKCAQEA0mockkeydata1234567890",
+            priv_footer
+        );
+        let aws_key = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+
+        let dirty = format!(
+            "Debug output: github={} pat={} auth={} cert={} aws={}",
+            ghp, pat, bearer, priv_key, aws_key
+        );
+
+        let clean = redact_sensitive_content(&dirty, None);
+        assert!(!clean.contains(&ghp), "ghp token must be redacted");
+        assert!(!clean.contains(&pat), "github_pat token must be redacted");
+        assert!(!clean.contains(&bearer), "bearer token must be redacted");
+        assert!(
+            !clean.contains(&priv_key),
+            "private key block must be redacted"
+        );
+        assert!(!clean.contains(&aws_key), "aws key must be redacted");
+        assert!(clean.contains("[REDACTED_API_KEY]"));
+        assert!(clean.contains("[REDACTED_PRIVATE_KEY]"));
     }
 
     #[test]

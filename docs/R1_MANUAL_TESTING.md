@@ -21,13 +21,13 @@ This guide details the exact step-by-step procedure for verifying Ruby Assistant
 
 3. **Generate Pairing Code**:
    - Launch Ruby Desktop Console: Navigate to the **Remote** tab.
-   - Click **Generate Pairing Code**. A one-time 4-digit code (e.g., `4821`) generated via CSPRNG will appear. It expires in 5 minutes.
+   - Click **Generate Pairing Code**. A one-time 4-digit code generated via CSPRNG will appear. It expires in 5 minutes.
 
 4. **Pair from Phone**:
    - Open Telegram on your phone and open your bot chat.
    - Send:
      ```
-     /pair 4821
+     /pair <code>
      ```
    - Expected Response:
      ```

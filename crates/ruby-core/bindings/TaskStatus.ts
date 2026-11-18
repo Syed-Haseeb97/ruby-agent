@@ -3,4 +3,4 @@
 /**
  * Background Task Lifecycle States.
  */
-export type TaskStatus = "Created" | "Queued" | "Running" | "Verifying" | "Completed" | "Failed" | "Cancelled" | "Timeout";
+export type TaskStatus = "Created" | "Queued" | "Running" | "Verifying" | "NeedsInput" | "Completed" | "Failed" | "Cancelled" | "Timeout";

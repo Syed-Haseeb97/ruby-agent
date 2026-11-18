@@ -21,6 +21,7 @@ pub struct RubyPaths {
     pub recordings_dir: PathBuf,
     pub memory_db_path: PathBuf,
     pub playwright_profile_dir: PathBuf,
+    pub jobs_db_path: PathBuf,
 }
 
 impl RubyPaths {
@@ -56,12 +57,17 @@ impl RubyPaths {
             .map(PathBuf::from)
             .unwrap_or_else(|_| base_ruby.join("playwright_profile"));
 
+        let jobs_db_path = std::env::var("RUBY_JOBS_DB_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| base_ruby.join("jobs.db"));
+
         Self {
             workspace_dir,
             screenshots_dir,
             recordings_dir,
             memory_db_path,
             playwright_profile_dir,
+            jobs_db_path,
         }
     }
 

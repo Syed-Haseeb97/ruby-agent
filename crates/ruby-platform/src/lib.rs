@@ -5,8 +5,11 @@
 pub mod elevation_check;
 pub mod hook_types;
 pub mod hotkey_machine;
+pub mod job_object;
 pub mod keyboard_hook;
 pub mod text_injection;
+
+pub use job_object::JobObjectProcessTree;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -177,6 +177,7 @@ impl DurableJobStore for SqliteJobStore {
                 "Queued" => TaskStatus::Queued,
                 "Running" => TaskStatus::Running,
                 "Verifying" => TaskStatus::Verifying,
+                "NeedsInput" => TaskStatus::NeedsInput,
                 "Completed" => TaskStatus::Completed,
                 "Failed" => TaskStatus::Failed,
                 "Cancelled" => TaskStatus::Cancelled,
@@ -228,6 +229,7 @@ impl DurableJobStore for SqliteJobStore {
                 "Queued" => TaskStatus::Queued,
                 "Running" => TaskStatus::Running,
                 "Verifying" => TaskStatus::Verifying,
+                "NeedsInput" => TaskStatus::NeedsInput,
                 "Completed" => TaskStatus::Completed,
                 "Failed" => TaskStatus::Failed,
                 "Cancelled" => TaskStatus::Cancelled,
@@ -368,6 +370,31 @@ impl LocalToolBackend {
     }
 }
 
+pub const ADVANCED_SHELL_DENYLIST: &[&str] = &[
+    "regedit.exe",
+    "regedit",
+    "reg.exe",
+    "reg",
+    "format.com",
+    "format",
+    "vssadmin.exe",
+    "vssadmin",
+    "bcdedit.exe",
+    "bcdedit",
+    "diskpart.exe",
+    "diskpart",
+    "net.exe",
+    "net",
+    "attrib.exe",
+    "attrib",
+    "takeown.exe",
+    "takeown",
+    "icacls.exe",
+    "icacls",
+];
+
+pub const MAX_JOB_OUTPUT_BYTES: usize = 65536; // 64 KB cap
+
 #[async_trait]
 impl ExecutionBackend for LocalToolBackend {
     async fn execute_command(&self, cmd: &str, args: &[String]) -> Result<String, CoreError> {
@@ -389,23 +416,102 @@ impl ExecutionBackend for LocalToolBackend {
                     cmd
                 )));
             }
+        } else {
+            // Advanced shell is ENABLED: enforce strict M5-1 safety gates
+            // 1. Deny list check
+            if ADVANCED_SHELL_DENYLIST.contains(&base_cmd.as_str()) {
+                return Err(CoreError::Execution(format!(
+                    "Command '{}' is blocked by advanced shell security denylist",
+                    cmd
+                )));
+            }
+
+            // 2. Argv-only enforcement: prohibit shell wrappers and chaining syntax
+            if base_cmd == "cmd"
+                || base_cmd == "cmd.exe"
+                || base_cmd == "powershell"
+                || base_cmd == "powershell.exe"
+            {
+                for arg in args {
+                    let a_lower = arg.to_ascii_lowercase();
+                    if a_lower == "/c"
+                        || a_lower == "-c"
+                        || a_lower == "-command"
+                        || a_lower == "-encodedcommand"
+                    {
+                        return Err(CoreError::Execution(
+                            "Arbitrary shell string evaluation (/c or -Command) is prohibited in argv mode".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            for arg in args {
+                if arg.contains('|')
+                    || arg.contains('>')
+                    || arg.contains('<')
+                    || arg.contains(';')
+                    || arg.contains('&')
+                    || arg.contains('`')
+                {
+                    return Err(CoreError::Execution(
+                        "Shell piping, redirection, and chaining syntax is strictly prohibited in argv mode".to_string(),
+                    ));
+                }
+            }
+
+            // 3. Non-elevated enforcement
+            if ruby_platform::elevation_check::is_current_process_elevated() {
+                return Err(CoreError::Execution(
+                    "Advanced shell execution refused: running under an elevated security token"
+                        .to_string(),
+                ));
+            }
         }
 
         let clean_env = Self::scrub_env_vars();
+
+        // Use Windows Job Object to guarantee full process tree termination
+        let job = ruby_platform::JobObjectProcessTree::new().ok();
 
         let mut command = tokio::process::Command::new(cmd);
         command.args(args);
         command.current_dir(&self.workspace_root);
         command.env_clear();
         command.envs(&clean_env);
+        command.stdout(std::process::Stdio::piped());
+        command.stderr(std::process::Stdio::piped());
 
-        let output = command
-            .output()
+        let child = command.spawn().map_err(|e| {
+            CoreError::Execution(format!("Command spawn failed for '{}': {}", cmd, e))
+        })?;
+
+        if let Some(ref j) = job {
+            if let Some(raw) = child.raw_handle() {
+                let _ = j.assign_process(raw);
+            }
+        }
+
+        let output = child
+            .wait_with_output()
             .await
             .map_err(|e| CoreError::Execution(format!("Command execution failed: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let mut stdout_raw = output.stdout;
+        let mut stderr_raw = output.stderr;
+
+        if stdout_raw.len() > MAX_JOB_OUTPUT_BYTES {
+            stdout_raw.truncate(MAX_JOB_OUTPUT_BYTES);
+        }
+        if stderr_raw.len() > MAX_JOB_OUTPUT_BYTES {
+            stderr_raw.truncate(MAX_JOB_OUTPUT_BYTES);
+        }
+
+        let stdout_str = String::from_utf8_lossy(&stdout_raw).to_string();
+        let stderr_str = String::from_utf8_lossy(&stderr_raw).to_string();
+
+        let stdout = ruby_gemini::dictation_client::redact_sensitive_content(&stdout_str, None);
+        let stderr = ruby_gemini::dictation_client::redact_sensitive_content(&stderr_str, None);
 
         if output.status.success() {
             Ok(stdout)
@@ -445,6 +551,9 @@ pub struct BackgroundTaskSupervisor {
     store: Arc<dyn DurableJobStore>,
     backend: Arc<dyn ExecutionBackend>,
     active_cancel_tokens: Arc<Mutex<HashMap<Uuid, Arc<AtomicBool>>>>,
+    active_job_trees: Arc<Mutex<HashMap<Uuid, Arc<ruby_platform::JobObjectProcessTree>>>>,
+    input_senders: Arc<Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<String>>>>,
+    concurrency_semaphore: Arc<tokio::sync::Semaphore>,
     default_timeout_secs: u64,
 }
 
@@ -454,10 +563,22 @@ impl BackgroundTaskSupervisor {
         backend: Arc<dyn ExecutionBackend>,
         default_timeout_secs: u64,
     ) -> Self {
+        Self::with_concurrency_limit(store, backend, default_timeout_secs, 10)
+    }
+
+    pub fn with_concurrency_limit(
+        store: Arc<dyn DurableJobStore>,
+        backend: Arc<dyn ExecutionBackend>,
+        default_timeout_secs: u64,
+        max_concurrent_jobs: usize,
+    ) -> Self {
         Self {
             store,
             backend,
             active_cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
+            active_job_trees: Arc::new(Mutex::new(HashMap::new())),
+            input_senders: Arc::new(Mutex::new(HashMap::new())),
+            concurrency_semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent_jobs)),
             default_timeout_secs,
         }
     }
@@ -476,12 +597,22 @@ impl BackgroundTaskSupervisor {
         let store = Arc::clone(&self.store);
         let _backend = Arc::clone(&self.backend);
         let active_map = Arc::clone(&self.active_cancel_tokens);
+        let active_trees = Arc::clone(&self.active_job_trees);
+        let sem = Arc::clone(&self.concurrency_semaphore);
         let timeout_secs = self.default_timeout_secs;
         let goal_text = goal.to_string();
 
         tokio::spawn(async move {
             info!(
-                "BackgroundTaskSupervisor: starting task {} ({})",
+                "BackgroundTaskSupervisor: queuing task {} ({})",
+                id, goal_text
+            );
+
+            // Wait for concurrency permit
+            let _permit = sem.acquire().await.ok();
+
+            info!(
+                "BackgroundTaskSupervisor: acquired permit, starting task {} ({})",
                 id, goal_text
             );
             let _ = store.update_status(id, TaskStatus::Running);
@@ -550,20 +681,54 @@ impl BackgroundTaskSupervisor {
             }
 
             active_map.lock().unwrap().remove(&id);
+            active_trees.lock().unwrap().remove(&id);
         });
 
         Ok(task)
     }
 
-    /// Cancels a running or queued background task.
+    /// Pauses a job waiting for user clarification or question response (M5-4 needs_input flow).
+    pub fn request_input(
+        &self,
+        id: Uuid,
+        question: &str,
+    ) -> Result<tokio::sync::oneshot::Receiver<String>, CoreError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.input_senders.lock().unwrap().insert(id, tx);
+        self.store.update_status(id, TaskStatus::NeedsInput)?;
+        let _ = self
+            .store
+            .append_log(id, &format!("Waiting for user input: {}", question));
+        Ok(rx)
+    }
+
+    /// Resumes a paused background task with user-provided answer (M5-4 needs_input flow).
+    pub fn resume_with_input(&self, id: Uuid, answer: &str) -> Result<bool, CoreError> {
+        if let Some(tx) = self.input_senders.lock().unwrap().remove(&id) {
+            let _ = self
+                .store
+                .append_log(id, &format!("Received user response: {}", answer));
+            let _ = self.store.update_status(id, TaskStatus::Running);
+            let _ = tx.send(answer.to_string());
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Cancels a running or queued background task, terminating the entire process tree via Windows Job Object (M5-2).
     pub fn cancel(&self, id: Uuid) -> Result<(), CoreError> {
         if let Some(token) = self.active_cancel_tokens.lock().unwrap().get(&id) {
             token.store(true, Ordering::SeqCst);
         }
+        if let Some(tree) = self.active_job_trees.lock().unwrap().get(&id) {
+            let _ = tree.kill_tree();
+        }
         self.store.update_status(id, TaskStatus::Cancelled)?;
-        let _ = self
-            .store
-            .append_log(id, "Cancellation requested by operator");
+        let _ = self.store.append_log(
+            id,
+            "Cancellation requested by operator (process tree terminated)",
+        );
         Ok(())
     }
 

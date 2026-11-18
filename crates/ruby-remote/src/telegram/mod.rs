@@ -43,6 +43,8 @@ pub struct TelegramAdapter {
     handler: Arc<Mutex<Option<Arc<dyn RemoteCommandHandler>>>>,
     computer_use_enabled: Arc<AtomicBool>,
     bg_supervisor: Arc<Mutex<Option<Arc<ruby_core::tasks::BackgroundTaskSupervisor>>>>,
+    voice_live_mgr: Arc<Mutex<Option<Arc<ruby_core::voice_live::VoiceLiveManager>>>>,
+    tool_mgr: Arc<Mutex<Option<Arc<ruby_mcp::PolicyGatedToolManager>>>>,
 }
 
 impl TelegramAdapter {
@@ -80,7 +82,17 @@ impl TelegramAdapter {
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
             bg_supervisor: Arc::new(Mutex::new(None)),
+            voice_live_mgr: Arc::new(Mutex::new(None)),
+            tool_mgr: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_voice_live_manager(&self, voice_live: Arc<ruby_core::voice_live::VoiceLiveManager>) {
+        *self.voice_live_mgr.lock().unwrap() = Some(voice_live);
+    }
+
+    pub fn set_tool_manager(&self, tool_mgr: Arc<ruby_mcp::PolicyGatedToolManager>) {
+        *self.tool_mgr.lock().unwrap() = Some(tool_mgr);
     }
 
     pub fn set_background_supervisor(
@@ -123,6 +135,8 @@ impl TelegramAdapter {
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
             bg_supervisor: Arc::new(Mutex::new(None)),
+            voice_live_mgr: Arc::new(Mutex::new(None)),
+            tool_mgr: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -149,6 +163,8 @@ impl TelegramAdapter {
                 ruby_config::ComputerUseConfig::load().enabled,
             )),
             bg_supervisor: Arc::new(Mutex::new(None)),
+            voice_live_mgr: Arc::new(Mutex::new(None)),
+            tool_mgr: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -472,7 +488,7 @@ impl TelegramAdapter {
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             "/logs" => {
-                let reply = {
+                let raw_logs = {
                     let guard = self.bg_supervisor.lock().unwrap();
                     if let Some(supervisor) = guard.as_ref() {
                         ruby_core::tasks::handle_background_command(
@@ -484,9 +500,28 @@ impl TelegramAdapter {
                         "Mode B Background Supervisor is not initialized.".to_string()
                     }
                 };
+                let redacted = redact_sensitive_content(&raw_logs, None);
                 self.audit_logger
                     .log_entry(sender_id, None, "logs", "query");
-                self.send_redacted_reply(chat_id, &reply).await?;
+
+                if redacted.len() > 4000 {
+                    let preview = format!(
+                        "📋 Logs for task (preview):\n{}\n\n[Full logs attached as document]",
+                        &redacted[..500.min(redacted.len())]
+                    );
+                    self.send_redacted_reply(chat_id, &preview).await?;
+                    let doc_name = format!("task_logs_{}.txt", args.trim());
+                    self.client
+                        .send_document(
+                            chat_id,
+                            &doc_name,
+                            redacted.as_bytes(),
+                            Some("Full task logs"),
+                        )
+                        .await?;
+                } else {
+                    self.send_redacted_reply(chat_id, &redacted).await?;
+                }
             }
             "/do" => {
                 let task_prompt = args.trim();
@@ -589,22 +624,51 @@ impl TelegramAdapter {
             "/stop" => {
                 let cancelled_count = self.task_mgr.cancel_all_active();
                 let pending_action = self.confirmation_mgr.cancel_pending();
+
+                // Stop voice live streaming immediately
+                let voice_live_opt = self.voice_live_mgr.lock().unwrap().clone();
+                if let Some(voice_live) = voice_live_opt {
+                    let _ = voice_live.stop().await;
+                }
+
+                // Stop all MCP server processes
+                let tool_mgr_opt = self.tool_mgr.lock().unwrap().clone();
+                if let Some(tool_mgr) = tool_mgr_opt {
+                    let _ = tool_mgr.stop_all().await;
+                }
+
+                // Cancel any running background tasks
+                if let Some(supervisor) = self.bg_supervisor.lock().unwrap().as_ref() {
+                    if let Ok(jobs) = supervisor.list_jobs(10) {
+                        for j in jobs {
+                            if matches!(
+                                j.status,
+                                ruby_core::TaskStatus::Running
+                                    | ruby_core::TaskStatus::Queued
+                                    | ruby_core::TaskStatus::NeedsInput
+                            ) {
+                                let _ = supervisor.cancel(j.id);
+                            }
+                        }
+                    }
+                }
+
                 self.audit_logger
                     .log_entry(sender_id, None, "stop", "all_cancelled");
                 let reply = if cancelled_count > 0 || pending_action.is_some() {
                     format!(
-                        "🛑 Cancelled {} active task(s) and cleared pending actions.",
+                        "🛑 Cancelled {} active task(s), stopped voice/tools, and cleared pending actions.",
                         cancelled_count
                     )
                 } else {
-                    "🛑 Stop confirmed. No active tasks were running.".to_string()
+                    "🛑 Stop confirmed. Stopped active sessions and tools.".to_string()
                 };
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             "/yes" => {
                 let code = args;
                 if code.is_empty() {
-                    self.send_redacted_reply(chat_id, "Usage: /yes <code> (e.g. /yes 4821)")
+                    self.send_redacted_reply(chat_id, "Usage: /yes <code>")
                         .await?;
                 } else {
                     match self.confirmation_mgr.verify_code(code) {

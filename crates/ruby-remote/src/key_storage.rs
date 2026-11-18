@@ -26,12 +26,20 @@ pub struct RemoteOffsetState {
 }
 
 pub fn get_ruby_data_dir() -> PathBuf {
-    let base = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| "D:\\projects\\ruby-agent".to_string());
-    let path = Path::new(&base).join(".ruby");
-    let _ = fs::create_dir_all(&path);
-    path
+    if let Ok(custom) = std::env::var("RUBY_DATA_DIR") {
+        PathBuf::from(custom)
+    } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let path = PathBuf::from(local_app_data).join("Ruby");
+        let _ = fs::create_dir_all(&path);
+        path
+    } else {
+        let base = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".to_string());
+        let path = Path::new(&base).join(".ruby");
+        let _ = fs::create_dir_all(&path);
+        path
+    }
 }
 
 fn config_path() -> PathBuf {

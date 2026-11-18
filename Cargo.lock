@@ -3484,6 +3484,7 @@ dependencies = [
  "ruby-config",
  "ruby-core",
  "ruby-gemini",
+ "ruby-mcp",
  "ruby-policy",
  "serde",
  "serde_json",

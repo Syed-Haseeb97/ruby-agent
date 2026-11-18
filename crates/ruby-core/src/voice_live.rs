@@ -160,7 +160,24 @@ impl LiveToolDispatcher for PolicyGatedLiveToolDispatcher {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, VoiceLiveError> {
-        let risk = self.policy.classify_tool("voice_live", name);
+        let mut risk = self.policy.classify_tool("voice_live", name);
+        if risk == ruby_policy::RiskClass::Unknown {
+            for s in &[
+                "actions",
+                "fs",
+                "memory",
+                "computer_use",
+                "playwright",
+                "shell",
+                "git",
+            ] {
+                let r = self.policy.classify_tool(s, name);
+                if r != ruby_policy::RiskClass::Unknown {
+                    risk = r;
+                    break;
+                }
+            }
+        }
         match risk {
             ruby_policy::RiskClass::ReadOnly => {
                 let inner_res = self.inner.dispatch(name, args).await?;

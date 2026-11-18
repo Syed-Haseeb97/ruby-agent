@@ -152,7 +152,7 @@ pub fn run() {
     ));
 
     let ruby_paths = ruby_config::RubyPaths::resolve();
-    let jobs_db_path = ruby_paths.workspace_dir.join("jobs.db");
+    let jobs_db_path = ruby_paths.jobs_db_path.clone();
     let job_store = Arc::new(
         ruby_core::tasks::SqliteJobStore::new(&jobs_db_path)
             .unwrap_or_else(|_| ruby_core::tasks::SqliteJobStore::new_in_memory().unwrap()),

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info};
@@ -19,6 +19,7 @@ use ruby_policy::{PolicyError, RiskClass, ToolSecurityPolicy};
 
 pub const PINNED_PLAYWRIGHT_MCP_VERSION: &str = "0.0.84";
 pub const MAX_MCP_RESPONSE_BYTES: usize = 65536; // 64 KB cap
+pub const MAX_MCP_LINE_BYTES: usize = 1024 * 1024; // 1 MB cap (S7 bounded MCP reads)
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Debug, Error)]
@@ -230,13 +231,56 @@ impl StdioMcpClient {
             .map_err(|_| McpError::Timeout(self.timeout_duration))?
             .map_err(|e| McpError::Process(format!("Write to child stdin failed: {e}")))?;
 
-        let mut line = String::new();
-        let read_fut = reader.read_line(&mut line);
+        // Bounded read with 1MB line cap (S7): kills child process if line exceeds cap before newline
+        let mut line_bytes = Vec::new();
+        let read_fut = async {
+            use tokio::io::AsyncReadExt;
+            let mut byte_buf = [0u8; 1];
+            loop {
+                let n = reader.read(&mut byte_buf).await?;
+                if n == 0 {
+                    break;
+                }
+                if byte_buf[0] == b'\n' {
+                    break;
+                }
+                line_bytes.push(byte_buf[0]);
+                if line_bytes.len() > MAX_MCP_LINE_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "MCP response line exceeded {} byte limit",
+                            MAX_MCP_LINE_BYTES
+                        ),
+                    ));
+                }
+            }
+            Ok::<(), std::io::Error>(())
+        };
 
-        tokio::time::timeout(self.timeout_duration, read_fut)
-            .await
-            .map_err(|_| McpError::Timeout(self.timeout_duration))?
-            .map_err(|e| McpError::Process(format!("Read from child stdout failed: {e}")))?;
+        match tokio::time::timeout(self.timeout_duration, read_fut).await {
+            Err(_) => {
+                if let Some(ref mut c) = self.child {
+                    let _ = c.kill().await;
+                }
+                self.stdin = None;
+                self.reader = None;
+                return Err(McpError::Timeout(self.timeout_duration));
+            }
+            Ok(Err(e)) => {
+                if let Some(ref mut c) = self.child {
+                    let _ = c.kill().await;
+                }
+                self.stdin = None;
+                self.reader = None;
+                return Err(McpError::Process(format!(
+                    "Read from child stdout failed or line exceeded cap (process killed): {e}"
+                )));
+            }
+            Ok(Ok(())) => {}
+        }
+
+        let line = String::from_utf8_lossy(&line_bytes).to_string();
 
         if line.trim().is_empty() {
             // Check if process exited
@@ -478,6 +522,42 @@ impl McpClient for HttpMcpClient {
     }
 }
 
+/// In-memory mock MCP client for unit testing against a mock MCP server interface.
+#[derive(Debug, Clone)]
+pub struct MockMcpClient {
+    pub canned_response: String,
+}
+
+impl MockMcpClient {
+    pub fn new(canned_response: impl Into<String>) -> Self {
+        Self {
+            canned_response: canned_response.into(),
+        }
+    }
+}
+
+#[async_trait]
+impl McpClient for MockMcpClient {
+    async fn list_tools(&mut self) -> Result<Vec<McpToolDefinition>, McpError> {
+        Ok(vec![])
+    }
+
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        _arguments: serde_json::Value,
+    ) -> Result<String, McpError> {
+        Ok(sanitize_as_passive_data(&format!(
+            "Mock MCP executed {name} successfully: {}",
+            self.canned_response
+        )))
+    }
+
+    async fn shutdown(&mut self) -> Result<(), McpError> {
+        Ok(())
+    }
+}
+
 /// Registry of configured MCP servers persisted at `~/.ruby/mcp_servers.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpRegistry {
@@ -552,6 +632,7 @@ impl McpRegistry {
 pub struct PlaywrightSidecarManager {
     config: McpServerConfig,
     client: Arc<Mutex<Option<StdioMcpClient>>>,
+    last_activity: Arc<Mutex<std::time::Instant>>,
 }
 
 impl PlaywrightSidecarManager {
@@ -559,6 +640,7 @@ impl PlaywrightSidecarManager {
         Self {
             config,
             client: Arc::new(Mutex::new(None)),
+            last_activity: Arc::new(Mutex::new(std::time::Instant::now())),
         }
     }
 
@@ -579,6 +661,7 @@ impl PlaywrightSidecarManager {
             );
             client.start().await?;
             *lock = Some(client);
+            *self.last_activity.lock().await = std::time::Instant::now();
             info!("Playwright MCP sidecar started with isolated profile");
         }
         Ok(())
@@ -586,6 +669,7 @@ impl PlaywrightSidecarManager {
 
     pub async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<String, McpError> {
         self.ensure_started().await?;
+        *self.last_activity.lock().await = std::time::Instant::now();
         let mut lock = self.client.lock().await;
         if let Some(ref mut client) = *lock {
             client.call_tool(name, args).await
@@ -593,6 +677,20 @@ impl PlaywrightSidecarManager {
             Err(McpError::Process(
                 "Playwright MCP client failed to start".into(),
             ))
+        }
+    }
+
+    /// Checks if the sidecar has been idle longer than `threshold` (default 5 minutes) and stops it if so.
+    pub async fn check_idle_and_stop(&self, threshold: Duration) -> bool {
+        let is_idle = {
+            let last = self.last_activity.lock().await;
+            last.elapsed() >= threshold
+        };
+        if is_idle {
+            let _ = self.stop().await;
+            true
+        } else {
+            false
         }
     }
 
@@ -609,11 +707,16 @@ impl PlaywrightSidecarManager {
 
 use ruby_policy::UnifiedConfirmationManager;
 
+pub type DynMcpClient = Arc<Mutex<Box<dyn McpClient>>>;
+pub type ActiveMcpClients = Arc<Mutex<HashMap<String, DynMcpClient>>>;
+
 /// Policy-gated tool execution manager combining `ToolSecurityPolicy` and MCP execution.
 pub struct PolicyGatedToolManager {
     policy: Arc<dyn ToolSecurityPolicy>,
     playwright: Arc<PlaywrightSidecarManager>,
     confirmations: Arc<UnifiedConfirmationManager>,
+    registry: Arc<Mutex<McpRegistry>>,
+    active_clients: ActiveMcpClients,
 }
 
 impl PolicyGatedToolManager {
@@ -625,6 +728,8 @@ impl PolicyGatedToolManager {
             policy,
             playwright,
             confirmations: Arc::new(UnifiedConfirmationManager::new()),
+            registry: Arc::new(Mutex::new(McpRegistry::default())),
+            active_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -637,11 +742,69 @@ impl PolicyGatedToolManager {
             policy,
             playwright,
             confirmations,
+            registry: Arc::new(Mutex::new(McpRegistry::default())),
+            active_clients: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn with_registry(
+        policy: Arc<dyn ToolSecurityPolicy>,
+        playwright: Arc<PlaywrightSidecarManager>,
+        confirmations: Arc<UnifiedConfirmationManager>,
+        registry: Arc<Mutex<McpRegistry>>,
+    ) -> Self {
+        Self {
+            policy,
+            playwright,
+            confirmations,
+            registry,
+            active_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn confirmation_manager(&self) -> Arc<UnifiedConfirmationManager> {
         self.confirmations.clone()
+    }
+
+    pub fn playwright_manager(&self) -> Arc<PlaywrightSidecarManager> {
+        self.playwright.clone()
+    }
+
+    pub async fn register_client(&self, server: &str, client: Box<dyn McpClient>) {
+        let mut clients = self.active_clients.lock().await;
+        clients.insert(server.to_string(), Arc::new(Mutex::new(client)));
+    }
+
+    async fn get_or_create_client(
+        &self,
+        server: &str,
+    ) -> Result<Option<Arc<Mutex<Box<dyn McpClient>>>>, McpError> {
+        let mut clients = self.active_clients.lock().await;
+        if let Some(client) = clients.get(server) {
+            return Ok(Some(client.clone()));
+        }
+
+        let reg = self.registry.lock().await;
+        if let Some(config) = reg.servers.get(server) {
+            if !config.enabled {
+                return Err(McpError::Process(format!(
+                    "MCP server '{server}' is disabled in configuration"
+                )));
+            }
+            let cmd = config.command.clone().unwrap_or_else(|| "cmd".to_string());
+            let mut client = StdioMcpClient::new(
+                cmd,
+                config.args.clone(),
+                config.env.clone(),
+                config.timeout_secs,
+            );
+            client.start().await?;
+            let client_arc: Arc<Mutex<Box<dyn McpClient>>> = Arc::new(Mutex::new(Box::new(client)));
+            clients.insert(server.to_string(), client_arc.clone());
+            Ok(Some(client_arc))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Validates and executes a tool call, requiring confirmation for Write/Destructive actions.
@@ -670,10 +833,12 @@ impl PolicyGatedToolManager {
         // 3. Dispatch to appropriate client
         if server.eq_ignore_ascii_case("playwright") {
             self.playwright.call_tool(tool_name, args).await
+        } else if let Some(client_lock) = self.get_or_create_client(server).await? {
+            let mut client = client_lock.lock().await;
+            client.call_tool(tool_name, args).await
         } else {
-            // Default tool execution return
-            Ok(sanitize_as_passive_data(&format!(
-                "Executed {tool_name} with arguments {args}"
+            Err(McpError::Process(format!(
+                "MCP server '{server}' is not registered or tool '{tool_name}' is not supported"
             )))
         }
     }
@@ -689,17 +854,26 @@ impl PolicyGatedToolManager {
             self.playwright
                 .call_tool(&action.tool_name, action.arguments)
                 .await
+        } else if let Some(client_lock) = self.get_or_create_client(&action.server).await? {
+            let mut client = client_lock.lock().await;
+            client.call_tool(&action.tool_name, action.arguments).await
         } else {
-            Ok(sanitize_as_passive_data(&format!(
-                "Confirmed and executed {} with arguments {}",
-                action.tool_name, action.arguments
+            Err(McpError::Process(format!(
+                "MCP server '{}' is not registered or tool '{}' is not supported",
+                action.server, action.tool_name
             )))
         }
     }
 
     /// Stops all running MCP background workers/sidecars immediately.
     pub async fn stop_all(&self) -> Result<(), McpError> {
-        self.playwright.stop().await
+        self.playwright.stop().await?;
+        let mut clients = self.active_clients.lock().await;
+        for (_name, client_arc) in clients.drain() {
+            let mut client = client_arc.lock().await;
+            let _ = client.shutdown().await;
+        }
+        Ok(())
     }
 }
 
@@ -751,6 +925,12 @@ mod tests {
             McpRegistry::default_playwright_config(),
         ));
         let manager = PolicyGatedToolManager::new(policy, sidecar);
+        manager
+            .register_client("fs", Box::new(MockMcpClient::new("file written")))
+            .await;
+        manager
+            .register_client("db", Box::new(MockMcpClient::new("record deleted")))
+            .await;
 
         // 1. Write tool requires confirmation
         let write_res = manager
@@ -769,20 +949,24 @@ mod tests {
 
                 // User replies with confirmation
                 let executed = manager.confirm_and_execute(&code).await.unwrap();
-                assert!(executed.contains("Confirmed and executed write_file"));
+                assert!(executed.contains("Mock MCP executed write_file successfully"));
             }
             other => panic!("Expected RequiresConfirmation, got {:?}", other),
         }
 
         // 2. Destructive tool requires confirmation
         let del_res = manager
-            .execute_tool("db", "delete_record", serde_json::json!({ "id": 1 }))
+            .execute_tool(
+                "fs",
+                "delete_file",
+                serde_json::json!({ "path": "test.txt" }),
+            )
             .await;
         match del_res {
             Err(McpError::RequiresConfirmation {
                 code, tool_name, ..
             }) => {
-                assert_eq!(tool_name, "delete_record");
+                assert_eq!(tool_name, "delete_file");
                 assert_eq!(code.len(), 4);
             }
             other => panic!("Expected RequiresConfirmation, got {:?}", other),

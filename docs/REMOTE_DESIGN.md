@@ -221,7 +221,7 @@ pub struct RemoteTask {
 
 ### Phase R1: Tool Execution via `ruby-policy`
 - **Engine Interface**: `TaskManager` will dispatch `Running` tasks to `ruby-policy` instead of returning the R0 placeholder.
-- **Interactive Approval**: If a policy rule requires user escalation (`PolicyDecision::NeedsApproval`), the task moves to `NeedsInput`, generates a 4-digit code, and messages the user: `"Tool execution requires confirmation: Run `git push`? Reply /yes 4821 or /no within 2 minutes."`
+- **Interactive Approval**: If a policy rule requires user escalation (`PolicyDecision::NeedsApproval`), the task moves to `NeedsInput`, generates a 4-digit code, and messages the user: `"Tool execution requires confirmation: Run `git push`? Reply /yes <code> or /no within 2 minutes."`
 - **Output Streaming**: Long-running command outputs will send progressive status updates to Telegram before final `Done`.
 
 ### Phase R2: Screen Capture & Visual Verification

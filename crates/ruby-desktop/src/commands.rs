@@ -702,6 +702,12 @@ mod tests {
             sidecar,
             Arc::clone(&confirmations),
         );
+        tool_mgr
+            .register_client(
+                "fs",
+                Box::new(ruby_mcp::MockMcpClient::new("mock filesystem contents")),
+            )
+            .await;
 
         // 1. Read-only tool automatically executes and returns DATA
         let read_req = ModelToolRequest {
