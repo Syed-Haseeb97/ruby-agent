@@ -22,6 +22,10 @@ regex.workspace = true
 default = []
 live-gemini = []
 live-freellmapi = []
+live-api = []
+
+[dev-dependencies]
+tokio = { workspace = true }
 
 [lints]
 workspace = true

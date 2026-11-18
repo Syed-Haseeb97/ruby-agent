@@ -28,7 +28,7 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
@@ -37,7 +37,8 @@ windows = { workspace = true, features = [
 
 [features]
 default = []
-test-capture = ["dep:base64"]
+test-capture = []
+voice-live = []
 
 [lints]
 workspace = true

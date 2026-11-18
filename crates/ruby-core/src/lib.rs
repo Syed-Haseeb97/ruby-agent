@@ -7,6 +7,7 @@
 
 pub mod chat;
 pub mod tts;
+pub mod voice_live;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

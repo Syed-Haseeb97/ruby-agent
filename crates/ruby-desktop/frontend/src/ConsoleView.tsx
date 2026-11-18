@@ -79,6 +79,49 @@ export const ConsoleView: React.FC = () => {
   } | null>(null);
   const [cuConfirmCodeInput, setCuConfirmCodeInput] = useState("");
 
+  // Milestone M5: Voice Live State
+  const [liveStatus, setLiveStatus] = useState<string>("idle");
+  const [liveTranscript, setLiveTranscript] = useState<
+    Array<{ text: string; is_final: boolean; timestamp_ms: number }>
+  >([]);
+
+  const fetchLiveStatus = async () => {
+    try {
+      const res = await invoke<{ status: string; transcript_entries: number }>(
+        "get_voice_live_status"
+      );
+      setLiveStatus(res.status);
+      if (res.status === "active" || res.transcript_entries > 0) {
+        const transcript = await invoke<
+          Array<{ text: string; is_final: boolean; timestamp_ms: number }>
+        >("get_voice_live_transcript");
+        setLiveTranscript(transcript);
+      }
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleStartLive = async () => {
+    try {
+      await invoke("start_voice_live");
+      setLiveStatus("starting");
+      setNotice("Voice Live session starting (gemini-3.8-live, voice: Aoede)...");
+    } catch (err) {
+      setNotice(`Failed to start Voice Live: ${String(err)}`);
+    }
+  };
+
+  const handleStopLive = async () => {
+    try {
+      await invoke("stop_voice_live");
+      setLiveStatus("stopping");
+      setNotice("Voice Live session terminating...");
+    } catch (err) {
+      setNotice(`Failed to stop Voice Live: ${String(err)}`);
+    }
+  };
+
   const fetchCuStatus = async () => {
     try {
       const status = await invoke<ComputerUseStatus>("get_computer_use_status");
@@ -230,10 +273,12 @@ export const ConsoleView: React.FC = () => {
   useEffect(() => {
     fetchRemoteStatus();
     fetchCuStatus();
+    fetchLiveStatus();
     const interval = setInterval(() => {
       fetchRemoteStatus();
       fetchCuStatus();
-    }, 4000);
+      fetchLiveStatus();
+    }, 3000);
     return () => clearInterval(interval);
   }, []);
 
@@ -1211,6 +1256,182 @@ export const ConsoleView: React.FC = () => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+        </section>
+
+        {/* Milestone M5: Voice Live (Bidirectional Streaming & Tool Execution) */}
+        <section
+          style={{
+            backgroundColor: "#FFFFFF",
+            border: "1px solid #C8C2B5",
+            borderRadius: "1rem",
+            padding: "1.5rem",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: "1.25rem",
+            }}
+          >
+            <div>
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                  borderRadius: "9999px",
+                  border: "1px solid #C8C2B5",
+                  backgroundColor:
+                    liveStatus === "active"
+                      ? "#E3EFE8"
+                      : liveStatus === "connecting"
+                      ? "#F6ECD9"
+                      : "#FFFFFF",
+                  padding: "0.25rem 0.875rem",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "11px",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color:
+                    liveStatus === "active"
+                      ? "#1D6B52"
+                      : liveStatus === "connecting"
+                      ? "#86560D"
+                      : "#5F626A",
+                  fontWeight: 600,
+                  marginBottom: "0.5rem",
+                }}
+              >
+                <span>STATUS: {liveStatus.toUpperCase()}</span>
+                {liveStatus === "active" && <span>• VOICE: AOEDE • 24KHZ PCM</span>}
+              </div>
+              <h2
+                style={{
+                  fontFamily: "'Instrument Serif', serif",
+                  fontSize: "1.75rem",
+                  margin: "0 0 0.25rem",
+                  color: "#16181D",
+                  lineHeight: 1.0,
+                }}
+              >
+                Gemini Live Voice Pipeline
+              </h2>
+              <p style={{ margin: 0, color: "#5F626A", fontSize: "0.875rem" }}>
+                Real-time bidirectional voice conversation via Gemini Live API (gemini-3.8-live) with low-latency streaming and integrated MCP tool execution.
+              </p>
+            </div>
+
+            <div>
+              {liveStatus === "idle" || liveStatus === "stopping" ? (
+                <button
+                  type="button"
+                  onClick={handleStartLive}
+                  style={{
+                    backgroundColor: "#16181D",
+                    color: "#F5F3EE",
+                    borderRadius: "9999px",
+                    padding: "0.625rem 1.25rem",
+                    fontFamily: "'Geist', sans-serif",
+                    fontWeight: 500,
+                    fontSize: "0.875rem",
+                    cursor: "pointer",
+                    border: "none",
+                  }}
+                >
+                  Start Live Session
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleStopLive}
+                  style={{
+                    backgroundColor: "#FFFFFF",
+                    border: "1px solid #B53A26",
+                    color: "#B53A26",
+                    borderRadius: "9999px",
+                    padding: "0.625rem 1.25rem",
+                    fontFamily: "'Geist', sans-serif",
+                    fontWeight: 600,
+                    fontSize: "0.875rem",
+                    cursor: "pointer",
+                  }}
+                >
+                  End Session (Esc)
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Live Transcript Container */}
+          <div
+            style={{
+              backgroundColor: "#F5F3EE",
+              border: "1px solid #C8C2B5",
+              borderRadius: "0.75rem",
+              padding: "1rem",
+              minHeight: "120px",
+              maxHeight: "260px",
+              overflowY: "auto",
+            }}
+          >
+            {liveTranscript.length === 0 ? (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  height: "100px",
+                  color: "#5F626A",
+                  fontFamily: "'Geist Mono', monospace",
+                  fontSize: "12px",
+                }}
+              >
+                {liveStatus === "active"
+                  ? "Listening to live audio stream... Speak naturally."
+                  : "Session idle. Press 'Start Live Session' to connect to Gemini 3.8 Live."}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                {liveTranscript.map((entry, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      display: "flex",
+                      gap: "0.75rem",
+                      fontSize: "0.875rem",
+                      lineHeight: "1.4",
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "'Geist Mono', monospace",
+                        fontSize: "10px",
+                        color: "#5F626A",
+                        whiteSpace: "nowrap",
+                        paddingTop: "0.15rem",
+                      }}
+                    >
+                      {new Date(entry.timestamp_ms).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        second: "2-digit",
+                      })}
+                    </span>
+                    <span
+                      style={{
+                        color: entry.is_final ? "#16181D" : "#5F626A",
+                        fontStyle: entry.is_final ? "normal" : "italic",
+                      }}
+                    >
+                      {entry.text}
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </div>

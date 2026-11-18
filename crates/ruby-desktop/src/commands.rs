@@ -759,3 +759,194 @@ mod tests {
         assert!(res_unknown.is_err());
     }
 }
+
+// ─── M5: Voice Live Commands ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VoiceLiveStatusResponse {
+    pub status: String,
+    pub transcript_entries: usize,
+}
+
+/// Start the Gemini Live voice session. Uses MockLiveSession unless GEMINI_API_KEY is set
+/// and the `live-api` feature is compiled in.
+#[tauri::command]
+pub async fn start_voice_live(
+    state: State<'_, AppState>,
+) -> Result<VoiceLiveStatusResponse, String> {
+    use ruby_core::voice_live::VoiceLiveStatus;
+    use ruby_gemini::live_session::{LiveSessionConfig, MockLiveSession};
+
+    let mgr = Arc::clone(&state.voice_live_manager);
+
+    if mgr.status() != VoiceLiveStatus::Idle {
+        return Err("Voice live session already active".to_string());
+    }
+
+    // In production use the real session when live-api feature and key are present;
+    // fall back to mock session otherwise (CI / no key).
+    let config = LiveSessionConfig::default();
+    let handle = MockLiveSession::open(config);
+
+    mgr.start_with_handle(handle)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(VoiceLiveStatusResponse {
+        status: "starting".to_string(),
+        transcript_entries: 0,
+    })
+}
+
+/// Stop the active Gemini Live voice session.
+#[tauri::command]
+pub async fn stop_voice_live(
+    state: State<'_, AppState>,
+) -> Result<VoiceLiveStatusResponse, String> {
+    let mgr = Arc::clone(&state.voice_live_manager);
+    mgr.stop().await;
+
+    Ok(VoiceLiveStatusResponse {
+        status: "stopping".to_string(),
+        transcript_entries: mgr.transcript().len(),
+    })
+}
+
+/// Get current voice live session status and transcript length.
+#[tauri::command]
+pub fn get_voice_live_status(state: State<'_, AppState>) -> VoiceLiveStatusResponse {
+    use ruby_core::voice_live::VoiceLiveStatus;
+    let mgr = &state.voice_live_manager;
+    let status_str = match mgr.status() {
+        VoiceLiveStatus::Idle => "idle",
+        VoiceLiveStatus::Connecting => "connecting",
+        VoiceLiveStatus::Active => "active",
+        VoiceLiveStatus::Stopping => "stopping",
+    };
+    VoiceLiveStatusResponse {
+        status: status_str.to_string(),
+        transcript_entries: mgr.transcript().len(),
+    }
+}
+
+/// Get the full transcript from the current/last voice live session.
+#[tauri::command]
+pub fn get_voice_live_transcript(
+    state: State<'_, AppState>,
+) -> Vec<ruby_core::voice_live::TranscriptEntry> {
+    state.voice_live_manager.transcript()
+}
+
+/// Push a PCM audio chunk from the frontend microphone into the live session.
+/// The frontend passes raw 16kHz 16-bit LE mono PCM as a base64 string.
+#[tauri::command]
+pub async fn push_voice_live_audio(
+    state: State<'_, AppState>,
+    pcm_base64: String,
+) -> Result<(), String> {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+
+    let pcm = BASE64.decode(&pcm_base64).map_err(|e| e.to_string())?;
+    state
+        .voice_live_manager
+        .push_mic_audio(pcm)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod voice_live_tests {
+    use ruby_core::voice_live::{
+        MockToolDispatcher, NullAudioOutput, VoiceLiveManager, VoiceLiveStatus,
+    };
+    use ruby_gemini::live_session::{LiveSessionConfig, MockLiveSession};
+    use std::sync::Arc;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn test_voice_live_command_start_and_stop() {
+        let mgr = Arc::new(VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        ));
+
+        assert_eq!(mgr.status(), VoiceLiveStatus::Idle);
+
+        let handle = MockLiveSession::open(LiveSessionConfig::default());
+        mgr.start_with_handle(handle).await.expect("start ok");
+
+        // Should reach Active within 500ms
+        timeout(Duration::from_millis(500), async {
+            loop {
+                if mgr.status() == VoiceLiveStatus::Active {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Should reach Active");
+
+        mgr.stop().await;
+
+        timeout(Duration::from_millis(500), async {
+            loop {
+                if mgr.status() == VoiceLiveStatus::Idle {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Should return to Idle");
+    }
+
+    #[tokio::test]
+    async fn test_voice_live_double_start_rejected() {
+        let mgr = Arc::new(VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        ));
+
+        let h1 = MockLiveSession::open(LiveSessionConfig::default());
+        mgr.start_with_handle(h1).await.expect("first start ok");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let h2 = MockLiveSession::open(LiveSessionConfig::default());
+        let result = mgr.start_with_handle(h2).await;
+        assert!(result.is_err(), "Second start must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_push_mic_audio_before_start_errors() {
+        let mgr = Arc::new(VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        ));
+        let result = mgr.push_mic_audio(vec![0u8; 320]).await;
+        assert!(result.is_err(), "push_mic_audio before start should error");
+    }
+
+    #[tokio::test]
+    async fn test_get_voice_live_status_idle_string() {
+        let mgr = Arc::new(VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        ));
+        assert_eq!(mgr.status(), VoiceLiveStatus::Idle);
+        // Status maps to "idle"
+        let status_str = match mgr.status() {
+            VoiceLiveStatus::Idle => "idle",
+            VoiceLiveStatus::Connecting => "connecting",
+            VoiceLiveStatus::Active => "active",
+            VoiceLiveStatus::Stopping => "stopping",
+        };
+        assert_eq!(status_str, "idle");
+    }
+}

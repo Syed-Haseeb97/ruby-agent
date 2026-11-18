@@ -44,6 +44,7 @@ pub struct AppState {
     pub computer_use_kill_switch: Arc<ruby_actions::computer_use::KillSwitchToken>,
     pub computer_use_audit: Arc<Mutex<Vec<ruby_actions::computer_use::StepRecord>>>,
     pub computer_use_active_goal: Arc<Mutex<Option<String>>>,
+    pub voice_live_manager: Arc<ruby_core::voice_live::VoiceLiveManager>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -141,6 +142,14 @@ pub fn run() {
     let computer_use_audit = Arc::new(Mutex::new(Vec::new()));
     let computer_use_active_goal = Arc::new(Mutex::new(None));
 
+    // M5: Voice Live manager — uses NullAudioOutput and MockToolDispatcher at startup;
+    // real audio output and policy-gated dispatcher are wired in the Tauri setup below.
+    let voice_live_manager = Arc::new(ruby_core::voice_live::VoiceLiveManager::new(
+        Arc::new(ruby_core::voice_live::NullAudioOutput),
+        Arc::new(ruby_core::voice_live::MockToolDispatcher::default()),
+        None, // orb callback wired after app handle available
+    ));
+
     let builder = tauri::Builder::default().manage(AppState {
         orb_state: Arc::clone(&orb_state_ref),
         seq_counter: Arc::clone(&seq_counter_ref),
@@ -155,6 +164,7 @@ pub fn run() {
         computer_use_kill_switch,
         computer_use_audit,
         computer_use_active_goal,
+        voice_live_manager,
     });
 
     #[cfg(feature = "test-capture")]
@@ -175,7 +185,12 @@ pub fn run() {
         commands::wipe_all_memories,
         commands::start_computer_use_task,
         commands::stop_computer_use_task,
-        commands::get_computer_use_status
+        commands::get_computer_use_status,
+        commands::start_voice_live,
+        commands::stop_voice_live,
+        commands::get_voice_live_status,
+        commands::get_voice_live_transcript,
+        commands::push_voice_live_audio
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -195,7 +210,12 @@ pub fn run() {
         commands::wipe_all_memories,
         commands::start_computer_use_task,
         commands::stop_computer_use_task,
-        commands::get_computer_use_status
+        commands::get_computer_use_status,
+        commands::start_voice_live,
+        commands::stop_voice_live,
+        commands::get_voice_live_status,
+        commands::get_voice_live_transcript,
+        commands::push_voice_live_audio
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);

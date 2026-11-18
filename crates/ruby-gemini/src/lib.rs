@@ -5,6 +5,7 @@
 pub mod chat_client;
 pub mod dictation_client;
 pub mod key_storage;
+pub mod live_session;
 pub mod openai_client;
 
 use async_trait::async_trait;
