@@ -184,12 +184,10 @@ impl LiveToolDispatcher for PolicyGatedLiveToolDispatcher {
                     "message": format!("[DATA_OUTPUT]\nAction '{}' requires user confirmation code {}. Confirm via Console or Telegram.\n[/DATA_OUTPUT]", name, code)
                 }))
             }
-            ruby_policy::RiskClass::Unknown => {
-                Err(VoiceLiveError::Tool(format!(
-                    "Tool '{}' denied by security policy (default-deny)",
-                    name
-                )))
-            }
+            ruby_policy::RiskClass::Unknown => Err(VoiceLiveError::Tool(format!(
+                "Tool '{}' denied by security policy (default-deny)",
+                name
+            ))),
         }
     }
 }
@@ -829,11 +827,8 @@ mod tests {
             canned_result: serde_json::json!({ "listing": ["file1.txt", "file2.txt"] }),
         });
 
-        let dispatcher = PolicyGatedLiveToolDispatcher::new(
-            policy,
-            Arc::clone(&confirmation_mgr),
-            mock_inner,
-        );
+        let dispatcher =
+            PolicyGatedLiveToolDispatcher::new(policy, Arc::clone(&confirmation_mgr), mock_inner);
 
         // 1. Read-only tool -> returns success with [DATA_OUTPUT] framing
         let read_res = dispatcher
@@ -858,13 +853,19 @@ mod tests {
         assert_eq!(write_res["status"], "requires_confirmation");
         let code = write_res["code"].as_str().expect("confirmation code");
         assert_eq!(code.len(), 4, "Code must be 4 digits");
-        assert!(write_res["message"].as_str().unwrap().contains("[DATA_OUTPUT]"));
+        assert!(write_res["message"]
+            .as_str()
+            .unwrap()
+            .contains("[DATA_OUTPUT]"));
 
         // 3. Unknown tool -> denied by default
         let unknown_res = dispatcher
             .dispatch("unrecognized_tool_xyz", serde_json::json!({}))
             .await;
-        assert!(unknown_res.is_err(), "Unknown tool must be denied by default");
+        assert!(
+            unknown_res.is_err(),
+            "Unknown tool must be denied by default"
+        );
     }
 
     #[tokio::test]

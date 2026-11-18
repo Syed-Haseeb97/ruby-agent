@@ -451,15 +451,18 @@ impl TelegramAdapter {
                         "Mode B Background Supervisor is not initialized.".to_string()
                     }
                 };
-                self.audit_logger
-                    .log_entry(sender_id, None, "job", "query");
+                self.audit_logger.log_entry(sender_id, None, "job", "query");
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             "/cancel" => {
                 let reply = {
                     let guard = self.bg_supervisor.lock().unwrap();
                     if let Some(supervisor) = guard.as_ref() {
-                        ruby_core::tasks::handle_background_command(supervisor, "/cancel", args.trim())
+                        ruby_core::tasks::handle_background_command(
+                            supervisor,
+                            "/cancel",
+                            args.trim(),
+                        )
                     } else {
                         "Mode B Background Supervisor is not initialized.".to_string()
                     }
@@ -472,7 +475,11 @@ impl TelegramAdapter {
                 let reply = {
                     let guard = self.bg_supervisor.lock().unwrap();
                     if let Some(supervisor) = guard.as_ref() {
-                        ruby_core::tasks::handle_background_command(supervisor, "/logs", args.trim())
+                        ruby_core::tasks::handle_background_command(
+                            supervisor,
+                            "/logs",
+                            args.trim(),
+                        )
                     } else {
                         "Mode B Background Supervisor is not initialized.".to_string()
                     }

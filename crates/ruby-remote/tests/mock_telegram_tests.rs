@@ -1075,13 +1075,18 @@ fn test_bot_token_env_fallback() {
 async fn test_telegram_background_job_commands_lifecycle() {
     let store = Arc::new(ruby_core::tasks::SqliteJobStore::new_in_memory().unwrap());
     let backend = Arc::new(ruby_core::MockBackend);
-    let supervisor = Arc::new(ruby_core::tasks::BackgroundTaskSupervisor::new(store, backend, 60));
+    let supervisor = Arc::new(ruby_core::tasks::BackgroundTaskSupervisor::new(
+        store, backend, 60,
+    ));
 
     let j = supervisor.submit("Clean build artifacts").await.unwrap();
     // Yield briefly to let the background task spawn and write initial start logs
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    let adapter = TelegramAdapter::with_base_url("MOCK_TOKEN".to_string(), Some("http://127.0.0.1".to_string()));
+    let adapter = TelegramAdapter::with_base_url(
+        "MOCK_TOKEN".to_string(),
+        Some("http://127.0.0.1".to_string()),
+    );
     adapter.set_background_supervisor(Arc::clone(&supervisor));
 
     // 1. /jobs
@@ -1090,16 +1095,19 @@ async fn test_telegram_background_job_commands_lifecycle() {
     assert!(jobs_resp.contains(&j.id.to_string()));
 
     // 2. /job <id>
-    let job_resp = ruby_core::tasks::handle_background_command(&supervisor, "/job", &j.id.to_string());
+    let job_resp =
+        ruby_core::tasks::handle_background_command(&supervisor, "/job", &j.id.to_string());
     assert!(job_resp.contains("Job Details:"));
     assert!(job_resp.contains("Clean build artifacts"));
 
     // 3. /logs <id>
-    let logs_resp = ruby_core::tasks::handle_background_command(&supervisor, "/logs", &j.id.to_string());
+    let logs_resp =
+        ruby_core::tasks::handle_background_command(&supervisor, "/logs", &j.id.to_string());
     assert!(logs_resp.contains("Task started"));
 
     // 4. /cancel <id>
-    let cancel_resp = ruby_core::tasks::handle_background_command(&supervisor, "/cancel", &j.id.to_string());
+    let cancel_resp =
+        ruby_core::tasks::handle_background_command(&supervisor, "/cancel", &j.id.to_string());
     assert!(cancel_resp.contains("cancelled"));
 }
 

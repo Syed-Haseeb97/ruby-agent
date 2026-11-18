@@ -137,19 +137,34 @@ impl DurableJobStore for SqliteJobStore {
     fn get_job(&self, id: Uuid) -> Result<Option<BackgroundTask>, CoreError> {
         let lock = self.conn.lock().unwrap();
         let mut stmt = lock
-            .prepare("SELECT id, goal, status, created_at, output FROM background_jobs WHERE id = ?1")
+            .prepare(
+                "SELECT id, goal, status, created_at, output FROM background_jobs WHERE id = ?1",
+            )
             .map_err(|e| CoreError::Execution(format!("Failed to prepare select: {}", e)))?;
 
         let mut rows = stmt
             .query(params![id.to_string()])
             .map_err(|e| CoreError::Execution(format!("Failed to query job: {}", e)))?;
 
-        if let Some(row) = rows.next().map_err(|e| CoreError::Execution(e.to_string()))? {
-            let id_str: String = row.get(0).map_err(|e| CoreError::Execution(e.to_string()))?;
-            let goal: String = row.get(1).map_err(|e| CoreError::Execution(e.to_string()))?;
-            let status_str: String = row.get(2).map_err(|e| CoreError::Execution(e.to_string()))?;
-            let created_str: String = row.get(3).map_err(|e| CoreError::Execution(e.to_string()))?;
-            let output: Option<String> = row.get(4).map_err(|e| CoreError::Execution(e.to_string()))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| CoreError::Execution(e.to_string()))?
+        {
+            let id_str: String = row
+                .get(0)
+                .map_err(|e| CoreError::Execution(e.to_string()))?;
+            let goal: String = row
+                .get(1)
+                .map_err(|e| CoreError::Execution(e.to_string()))?;
+            let status_str: String = row
+                .get(2)
+                .map_err(|e| CoreError::Execution(e.to_string()))?;
+            let created_str: String = row
+                .get(3)
+                .map_err(|e| CoreError::Execution(e.to_string()))?;
+            let output: Option<String> = row
+                .get(4)
+                .map_err(|e| CoreError::Execution(e.to_string()))?;
 
             let parsed_id = Uuid::parse_str(&id_str)
                 .map_err(|e| CoreError::Execution(format!("Invalid UUID: {}", e)))?;
@@ -239,7 +254,11 @@ impl DurableJobStore for SqliteJobStore {
 
         let rows = stmt
             .query_map(params![id.to_string()], |row| {
-                Ok(format!("[{}] {}", row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok(format!(
+                    "[{}] {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
             })
             .map_err(|e| CoreError::Execution(format!("Failed to query logs: {}", e)))?;
 
@@ -461,7 +480,10 @@ impl BackgroundTaskSupervisor {
         let goal_text = goal.to_string();
 
         tokio::spawn(async move {
-            info!("BackgroundTaskSupervisor: starting task {} ({})", id, goal_text);
+            info!(
+                "BackgroundTaskSupervisor: starting task {} ({})",
+                id, goal_text
+            );
             let _ = store.update_status(id, TaskStatus::Running);
             let _ = store.append_log(id, &format!("Task started with goal: {}", goal_text));
 
@@ -489,7 +511,9 @@ impl BackgroundTaskSupervisor {
                 Ok::<(), CoreError>(())
             };
 
-            let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), exec_future).await;
+            let outcome =
+                tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), exec_future)
+                    .await;
 
             match outcome {
                 Ok(Ok(())) => {
@@ -503,8 +527,14 @@ impl BackgroundTaskSupervisor {
                 }
                 Ok(Err(CoreError::GuiIsolationRequired)) => {
                     let _ = store.update_status(id, TaskStatus::Failed);
-                    let _ = store.append_log(id, "GUI actions in background mode require isolation: GUI_ISOLATION_REQUIRED");
-                    warn!("BackgroundTaskSupervisor: task {} failed GUI isolation check", id);
+                    let _ = store.append_log(
+                        id,
+                        "GUI actions in background mode require isolation: GUI_ISOLATION_REQUIRED",
+                    );
+                    warn!(
+                        "BackgroundTaskSupervisor: task {} failed GUI isolation check",
+                        id
+                    );
                 }
                 Ok(Err(e)) => {
                     let _ = store.update_status(id, TaskStatus::Failed);
@@ -513,7 +543,8 @@ impl BackgroundTaskSupervisor {
                 }
                 Err(_) => {
                     let _ = store.update_status(id, TaskStatus::Timeout);
-                    let _ = store.append_log(id, &format!("Task timed out after {}s", timeout_secs));
+                    let _ =
+                        store.append_log(id, &format!("Task timed out after {}s", timeout_secs));
                     warn!("BackgroundTaskSupervisor: task {} timed out", id);
                 }
             }
@@ -530,7 +561,9 @@ impl BackgroundTaskSupervisor {
             token.store(true, Ordering::SeqCst);
         }
         self.store.update_status(id, TaskStatus::Cancelled)?;
-        let _ = self.store.append_log(id, "Cancellation requested by operator");
+        let _ = self
+            .store
+            .append_log(id, "Cancellation requested by operator");
         Ok(())
     }
 
@@ -649,7 +682,9 @@ mod tests {
         assert_eq!(job.status, TaskStatus::Queued);
 
         store.update_status(job.id, TaskStatus::Running).unwrap();
-        store.append_log(job.id, "Step 1: Parsing markdown").unwrap();
+        store
+            .append_log(job.id, "Step 1: Parsing markdown")
+            .unwrap();
         store.set_output(job.id, "Report generated").unwrap();
 
         let retrieved = store.get_job(job.id).unwrap().unwrap();
@@ -680,7 +715,9 @@ mod tests {
         let backend = LocalToolBackend::new(dir.path().to_path_buf(), false);
 
         // Disallowed command
-        let res = backend.execute_command("powershell", &["-Command".to_string(), "dir".to_string()]).await;
+        let res = backend
+            .execute_command("powershell", &["-Command".to_string(), "dir".to_string()])
+            .await;
         assert!(res.is_err());
         let err_str = res.unwrap_err().to_string();
         assert!(err_str.contains("Advanced shell execution is disabled by default"));
@@ -705,7 +742,10 @@ mod tests {
 
         let res = backend.write_file("../../outside.txt", b"exploit").await;
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("Path traversal blocked"));
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal blocked"));
     }
 
     #[tokio::test]
@@ -736,7 +776,10 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let job = supervisor.get_job(task.id).unwrap().unwrap();
-        assert!(matches!(job.status, TaskStatus::Timeout | TaskStatus::Cancelled | TaskStatus::Running));
+        assert!(matches!(
+            job.status,
+            TaskStatus::Timeout | TaskStatus::Cancelled | TaskStatus::Running
+        ));
     }
 
     #[test]
@@ -758,7 +801,10 @@ mod tests {
         assert!(job_out.contains("Generate report"));
 
         // /logs <id>
-        supervisor.store.append_log(j1.id, "Step 1 started").unwrap();
+        supervisor
+            .store
+            .append_log(j1.id, "Step 1 started")
+            .unwrap();
         let logs_out = handle_background_command(&supervisor, "/logs", &j1.id.to_string());
         assert!(logs_out.contains("Step 1 started"));
 
