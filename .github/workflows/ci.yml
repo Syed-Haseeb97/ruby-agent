@@ -40,13 +40,13 @@ jobs:
       - name: Verify No Private Data In Git
         shell: bash
         run: |
-          count=$(git ls-files | grep -iE "playwright_profile|\.db$" | wc -l)
-          if [ "$count" -gt 0 ]; then
+          matches=$(git ls-files | grep -iE "playwright_profile|\.db$" || true)
+          if [ -n "$matches" ]; then
             echo "ERROR: Private data or database file tracked in git!"
-            git ls-files | grep -iE "playwright_profile|\.db$"
+            echo "$matches"
             exit 1
           fi
-          echo "Private data check passed."
+          echo "Private data check passed: zero private files tracked in git."
 
       - name: Verify Code Formatting
         run: cargo fmt --check
