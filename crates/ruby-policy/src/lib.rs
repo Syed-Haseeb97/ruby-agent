@@ -409,7 +409,16 @@ impl SecurityPolicy for DefaultSecurityPolicy {
             }
         }
 
-        // 3. DNS resolution check: resolve host to all IPs
+        // 3. DNS resolution check (Best-effort pre-flight check):
+        // ARCHITECTURAL SECURITY NOTES:
+        // A. DNS-time pre-flight checks CANNOT completely prevent DNS rebinding attacks,
+        //    because a malicious authoritative nameserver can return a benign public IP
+        //    on initial resolution and subsequently return 127.0.0.1 or an RFC1918 private IP (TTL=0)
+        //    when the HTTP client actually connects.
+        // B. The PRIMARY security control against SSRF is strict domain allowlisting
+        //    (`allowed_domains`), which is evaluated before this step.
+        // C. Synchronous DNS resolvers (`to_socket_addrs`) must not block the async runtime
+        //    indefinitely; this check is a secondary defense-in-depth gate.
         let port = url.port_or_known_default().unwrap_or(80);
         if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
             for addr in addrs {

@@ -10,9 +10,9 @@ pub use action::{
     map_virtual_to_normalized, ComputerAction, MonitorGeometry, MouseButton,
 };
 pub use agent_loop::{
-    get_active_window_info, ComputerUseAgentConfig, ComputerUseAgentLoop, ComputerUseModelClient,
-    KillSwitchToken, MockComputerUseModelClient, MockPlatformSecurityInspector,
-    PlatformSecurityInspector, StepRecord, TaskStatus,
+    get_active_window_info, get_all_visible_windows_info, ComputerUseAgentConfig,
+    ComputerUseAgentLoop, ComputerUseModelClient, KillSwitchToken, MockComputerUseModelClient,
+    MockPlatformSecurityInspector, PlatformSecurityInspector, StepRecord, TaskStatus,
 };
 pub use executor::{ComputerUseExecutor, HeldInputs, MockComputerUseExecutor, ScreenCapture};
 pub use gemini_vision::GeminiVisionComputerUseModelClient;

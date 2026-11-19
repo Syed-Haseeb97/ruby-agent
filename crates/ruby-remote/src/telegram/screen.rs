@@ -23,6 +23,8 @@ pub trait RemoteScreenCapturer: Send + Sync {
     async fn capture_screen(&self) -> Result<CapturedScreen, String>;
 }
 
+type WindowList = Vec<(String, String)>;
+
 /// Production implementation of RemoteScreenCapturer wrapping ComputerUseExecutor
 /// and PlatformSecurityInspector with denylist and session validation.
 pub struct DefaultRemoteScreenCapturer {
@@ -30,6 +32,7 @@ pub struct DefaultRemoteScreenCapturer {
     inspector: Arc<dyn PlatformSecurityInspector>,
     denylist: Vec<String>,
     window_override: Arc<std::sync::Mutex<Option<(String, String)>>>,
+    visible_windows_override: Arc<std::sync::Mutex<Option<WindowList>>>,
 }
 
 impl DefaultRemoteScreenCapturer {
@@ -43,6 +46,7 @@ impl DefaultRemoteScreenCapturer {
             inspector,
             denylist,
             window_override: Arc::new(std::sync::Mutex::new(None)),
+            visible_windows_override: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -56,11 +60,28 @@ impl DefaultRemoteScreenCapturer {
         *self.window_override.lock().unwrap() = None;
     }
 
+    /// Sets an explicit list of visible windows for hermetic testing.
+    pub fn set_visible_windows_override(&self, windows: Vec<(String, String)>) {
+        *self.visible_windows_override.lock().unwrap() = Some(windows);
+    }
+
+    /// Clears visible windows override.
+    pub fn clear_visible_windows_override(&self) {
+        *self.visible_windows_override.lock().unwrap() = None;
+    }
+
     fn inspect_active_window(&self) -> (String, String) {
         if let Some(pair) = self.window_override.lock().unwrap().clone() {
             return pair;
         }
         ruby_actions::computer_use::get_active_window_info()
+    }
+
+    fn inspect_all_visible_windows(&self) -> Vec<(String, String)> {
+        if let Some(list) = self.visible_windows_override.lock().unwrap().clone() {
+            return list;
+        }
+        ruby_actions::computer_use::get_all_visible_windows_info()
     }
 }
 
@@ -81,12 +102,16 @@ impl RemoteScreenCapturer for DefaultRemoteScreenCapturer {
             return Err("Secure desktop or elevated process active".into());
         }
 
-        // 3. Denylist check on foreground window
-        let (title, proc_name) = self.inspect_active_window();
-        if is_window_denylisted_with_custom(&title, &proc_name, &self.denylist) {
-            return Err(format!(
-                "Foreground window \"{title}\" is protected by security denylist"
-            ));
+        // 3. Denylist check on ALL visible top-level windows (full desktop capture guard)
+        let mut all_windows = self.inspect_all_visible_windows();
+        all_windows.push(self.inspect_active_window());
+
+        for (title, proc_name) in all_windows {
+            if is_window_denylisted_with_custom(&title, &proc_name, &self.denylist) {
+                return Err(format!(
+                    "Visible window \"{title}\" is protected by security denylist"
+                ));
+            }
         }
 
         // 4. In-memory screen capture
@@ -111,6 +136,8 @@ pub struct MockRemoteScreenCapturer {
     pub session_locked: bool,
     pub elevated_or_secure_desktop: bool,
     pub denylisted_window: bool,
+    pub visible_windows: Vec<(String, String)>,
+    pub denylist: Vec<String>,
     pub mock_error: Option<String>,
     pub mock_bytes: Vec<u8>,
     pub width: u32,
@@ -123,6 +150,8 @@ impl Default for MockRemoteScreenCapturer {
             session_locked: false,
             elevated_or_secure_desktop: false,
             denylisted_window: false,
+            visible_windows: Vec::new(),
+            denylist: Vec::new(),
             mock_error: None,
             mock_bytes: vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46], // JPEG magic header
             width: 1920,
@@ -142,6 +171,13 @@ impl RemoteScreenCapturer for MockRemoteScreenCapturer {
         }
         if self.denylisted_window {
             return Err("Foreground window is protected by security denylist".into());
+        }
+        for (title, proc_name) in &self.visible_windows {
+            if is_window_denylisted_with_custom(title, proc_name, &self.denylist) {
+                return Err(format!(
+                    "Visible window \"{title}\" is protected by security denylist"
+                ));
+            }
         }
         if let Some(ref err) = self.mock_error {
             return Err(err.clone());

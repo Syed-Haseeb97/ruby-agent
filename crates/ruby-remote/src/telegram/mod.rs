@@ -463,63 +463,41 @@ impl TelegramAdapter {
                 self.send_redacted_reply(chat_id, help_text).await?;
             }
             "/screen" => {
-                let capturer_opt = self.screen_capturer.lock().unwrap().clone();
-                if let Some(capturer) = capturer_opt {
-                    match capturer.capture_screen().await {
-                        Ok(captured) => {
-                            self.audit_logger
-                                .log_entry(sender_id, None, "screen", "success");
-                            let caption = format!(
-                                "📸 Desktop Screenshot ({}x{})",
-                                captured.width, captured.height
-                            );
-                            let send_res = self
-                                .client
-                                .send_photo(chat_id, "screen.jpg", &captured.data, Some(&caption))
-                                .await;
-
-                            if send_res.is_err() {
-                                let doc_res = self
-                                    .client
-                                    .send_document(
-                                        chat_id,
-                                        "screen.jpg",
-                                        &captured.data,
-                                        Some(&caption),
-                                    )
-                                    .await;
-                                if let Err(e) = doc_res {
-                                    self.send_redacted_reply(
-                                        chat_id,
-                                        &format!("❌ Failed to send screenshot: {e}"),
-                                    )
-                                    .await?;
-                                }
-                            }
-                        }
-                        Err(reason) => {
-                            let sanitized_reason = reason.replace(' ', "_").to_lowercase();
-                            self.audit_logger.log_entry(
-                                sender_id,
-                                None,
-                                "screen",
-                                &format!("refused_{sanitized_reason}"),
-                            );
-                            self.send_redacted_reply(
-                                chat_id,
-                                &format!("❌ Screen capture refused: {reason}."),
-                            )
-                            .await?;
-                        }
-                    }
-                } else {
+                let allow_screenshots = self.config.lock().unwrap().allow_screenshots;
+                if !allow_screenshots {
                     self.audit_logger
-                        .log_entry(sender_id, None, "screen", "not_initialized");
+                        .log_entry(sender_id, None, "screen", "refused_disabled");
                     self.send_redacted_reply(
                         chat_id,
-                        "❌ Screen capture is not initialized or computer use is unavailable.",
+                        "❌ Screen capture is disabled in configuration (remote.allow_screenshots = false).",
                     )
                     .await?;
+                } else {
+                    let capturer_opt = self.screen_capturer.lock().unwrap().clone();
+                    if capturer_opt.is_none() {
+                        self.audit_logger
+                            .log_entry(sender_id, None, "screen", "not_initialized");
+                        self.send_redacted_reply(
+                            chat_id,
+                            "❌ Screen capture is not initialized or computer use is unavailable.",
+                        )
+                        .await?;
+                    } else {
+                        let code = self
+                            .confirmation_mgr
+                            .register_action("remote_screen_capture", "remote_screen_capture");
+                        let expires = crate::confirmation::CONFIRMATION_TTL.as_secs();
+                        self.audit_logger.log_entry(
+                            sender_id,
+                            None,
+                            "screen",
+                            "pending_confirmation",
+                        );
+                        let prompt = format!(
+                            "⚠️ Confirm remote screen capture?\nNotice: Telegram bot messages are not end-to-end encrypted.\nReply /yes {code} (expires in {expires}s) or /no to reject."
+                        );
+                        self.send_redacted_reply(chat_id, &prompt).await?;
+                    }
                 }
             }
             "/jobs" => {
@@ -763,8 +741,81 @@ impl TelegramAdapter {
                                     None,
                                 );
                             }
-                            let reply = format!("✅ Confirmed action: {}", action.description);
-                            self.send_redacted_reply(chat_id, &reply).await?;
+                            if action.description == "remote_screen_capture" {
+                                let capturer_opt = self.screen_capturer.lock().unwrap().clone();
+                                if let Some(capturer) = capturer_opt {
+                                    match capturer.capture_screen().await {
+                                        Ok(captured) => {
+                                            self.audit_logger
+                                                .log_entry(sender_id, None, "screen", "success");
+                                            let caption = format!(
+                                                "📸 Desktop Screenshot ({}x{})",
+                                                captured.width, captured.height
+                                            );
+                                            let send_res = self
+                                                .client
+                                                .send_photo(
+                                                    chat_id,
+                                                    "screen.jpg",
+                                                    &captured.data,
+                                                    Some(&caption),
+                                                )
+                                                .await;
+
+                                            if send_res.is_err() {
+                                                let doc_res = self
+                                                    .client
+                                                    .send_document(
+                                                        chat_id,
+                                                        "screen.jpg",
+                                                        &captured.data,
+                                                        Some(&caption),
+                                                    )
+                                                    .await;
+                                                if let Err(e) = doc_res {
+                                                    self.send_redacted_reply(
+                                                        chat_id,
+                                                        &format!(
+                                                            "❌ Failed to send screenshot: {e}"
+                                                        ),
+                                                    )
+                                                    .await?;
+                                                }
+                                            }
+                                        }
+                                        Err(reason) => {
+                                            let sanitized_reason =
+                                                reason.replace(' ', "_").to_lowercase();
+                                            self.audit_logger.log_entry(
+                                                sender_id,
+                                                None,
+                                                "screen",
+                                                &format!("refused_{sanitized_reason}"),
+                                            );
+                                            self.send_redacted_reply(
+                                                chat_id,
+                                                &format!("❌ Screen capture refused: {reason}."),
+                                            )
+                                            .await?;
+                                        }
+                                    }
+                                } else {
+                                    self.audit_logger.log_entry(
+                                        sender_id,
+                                        None,
+                                        "screen",
+                                        "not_initialized",
+                                    );
+                                    self.send_redacted_reply(
+                                        chat_id,
+                                        "❌ Screen capture is not initialized or computer use is unavailable.",
+                                    )
+                                    .await?;
+                                }
+                            } else {
+                                let reply = format!("✅ Confirmed action: {}", action.description);
+                                self.send_redacted_reply(chat_id, &reply).await?;
+                            }
                         }
                         Err(e) => {
                             self.audit_logger

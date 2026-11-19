@@ -525,16 +525,64 @@ pub fn search_memories(
 }
 
 #[tauri::command]
-pub fn delete_memory(state: State<'_, AppState>, id: i64) -> Result<bool, String> {
-    state
-        .memory_store
-        .delete_memory(id)
-        .map_err(|e| e.to_string())
+pub fn delete_memory(
+    state: State<'_, AppState>,
+    id: i64,
+    confirmation_code: Option<String>,
+) -> Result<String, String> {
+    let conf_mgr = state.tool_manager.confirmation_manager();
+    if let Some(code) = confirmation_code {
+        conf_mgr
+            .verify_and_consume(&code)
+            .map_err(|e| format!("Confirmation failed: {e}"))?;
+        state
+            .memory_store
+            .delete_memory(id)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("Memory record [ID: {id}] deleted."))
+    } else {
+        let desc = format!("Delete memory record [ID: {id}]");
+        let code = conf_mgr.register_action(
+            "memory",
+            "delete_memory",
+            serde_json::json!({ "id": id }),
+            &desc,
+        );
+        Err(format!(
+            "Requires confirmation: {desc}. Reply with code {code} to confirm."
+        ))
+    }
 }
 
 #[tauri::command]
-pub fn wipe_all_memories(state: State<'_, AppState>) -> Result<usize, String> {
-    state.memory_store.wipe_all().map_err(|e| e.to_string())
+pub fn wipe_all_memories(
+    state: State<'_, AppState>,
+    confirmation_code: Option<String>,
+) -> Result<String, String> {
+    let conf_mgr = state.tool_manager.confirmation_manager();
+    let count = state
+        .memory_store
+        .search_memories("", 1000)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if let Some(code) = confirmation_code {
+        conf_mgr
+            .verify_and_consume(&code)
+            .map_err(|e| format!("Confirmation failed: {e}"))?;
+        let wiped = state.memory_store.wipe_all().map_err(|e| e.to_string())?;
+        Ok(format!("All memories wiped (total {wiped} records)."))
+    } else {
+        let desc = format!("Wipe all memories (total {count} records)");
+        let code = conf_mgr.register_action(
+            "memory",
+            "wipe_all",
+            serde_json::json!({ "count": count }),
+            &desc,
+        );
+        Err(format!(
+            "Requires confirmation: {desc}. Reply with code {code} to confirm."
+        ))
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

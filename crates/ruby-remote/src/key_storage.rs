@@ -18,6 +18,8 @@ pub struct RemoteConfig {
     pub paired_user_id: Option<i64>,
     #[serde(default)]
     pub allowed_roots: Vec<PathBuf>,
+    #[serde(default)]
+    pub allow_screenshots: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

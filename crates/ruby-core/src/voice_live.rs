@@ -977,4 +977,120 @@ mod tests {
 
         assert_eq!(mgr.status(), VoiceLiveStatus::Idle);
     }
+
+    #[tokio::test]
+    async fn test_voice_live_stopped_via_telegram_and_hotkey() {
+        let mgr = Arc::new(VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        ));
+
+        // 1. Start session
+        let handle = MockLiveSession::open(LiveSessionConfig::default());
+        mgr.start_with_handle(handle).await.expect("start ok");
+        let _ = timeout(Duration::from_millis(500), async {
+            while mgr.status() != VoiceLiveStatus::Active {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(mgr.status(), VoiceLiveStatus::Active);
+
+        // 2. Stop via hotkey (calls mgr.stop())
+        mgr.stop().await;
+        let _ = timeout(Duration::from_millis(500), async {
+            while mgr.status() != VoiceLiveStatus::Idle {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(mgr.status(), VoiceLiveStatus::Idle);
+
+        // 3. Restart and stop via simulated Telegram /stop command
+        let handle2 = MockLiveSession::open(LiveSessionConfig::default());
+        mgr.start_with_handle(handle2).await.expect("start ok");
+        let _ = timeout(Duration::from_millis(500), async {
+            while mgr.status() != VoiceLiveStatus::Active {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(mgr.status(), VoiceLiveStatus::Active);
+
+        // Telegram /stop triggers stop() asynchronously
+        let mgr_clone = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            mgr_clone.stop().await;
+        })
+        .await
+        .unwrap();
+
+        let _ = timeout(Duration::from_millis(500), async {
+            while mgr.status() != VoiceLiveStatus::Idle {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(mgr.status(), VoiceLiveStatus::Idle);
+    }
+
+    #[test]
+    fn test_esc_key_deconfliction_hierarchy_mode_a_then_voice_then_dictation() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum EscHandlingOutcome {
+            ModeAKillSwitch,
+            VoiceLiveStop,
+            DictationCancel,
+            PassThrough,
+        }
+
+        fn dispatch_esc_key(
+            mode_a_active: bool,
+            voice_live_active: bool,
+            dictation_active: bool,
+        ) -> EscHandlingOutcome {
+            if mode_a_active {
+                EscHandlingOutcome::ModeAKillSwitch
+            } else if voice_live_active {
+                EscHandlingOutcome::VoiceLiveStop
+            } else if dictation_active {
+                EscHandlingOutcome::DictationCancel
+            } else {
+                EscHandlingOutcome::PassThrough
+            }
+        }
+
+        // 1. When Mode A is active, it strictly preempts everything else
+        assert_eq!(
+            dispatch_esc_key(true, true, true),
+            EscHandlingOutcome::ModeAKillSwitch
+        );
+        assert_eq!(
+            dispatch_esc_key(true, false, false),
+            EscHandlingOutcome::ModeAKillSwitch
+        );
+
+        // 2. When Mode A is idle but Voice Live is active, it stops Voice Live
+        assert_eq!(
+            dispatch_esc_key(false, true, true),
+            EscHandlingOutcome::VoiceLiveStop
+        );
+        assert_eq!(
+            dispatch_esc_key(false, true, false),
+            EscHandlingOutcome::VoiceLiveStop
+        );
+
+        // 3. When Mode A and Voice Live are idle but Dictation is active, it cancels Dictation
+        assert_eq!(
+            dispatch_esc_key(false, false, true),
+            EscHandlingOutcome::DictationCancel
+        );
+
+        // 4. When none are active, Esc passes through cleanly to foreground app
+        assert_eq!(
+            dispatch_esc_key(false, false, false),
+            EscHandlingOutcome::PassThrough
+        );
+    }
 }

@@ -281,6 +281,61 @@ pub fn get_active_window_info() -> (String, String) {
     }
 }
 
+/// Enumerates all currently visible top-level windows and their owning process executable names.
+pub fn get_all_visible_windows_info() -> Vec<(String, String)> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+        use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+            IsWindowVisible,
+        };
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let list = &mut *(lparam.0 as *mut Vec<(String, String)>);
+            if IsWindowVisible(hwnd).as_bool() {
+                let len = GetWindowTextLengthW(hwnd);
+                if len > 0 {
+                    let mut buf = vec![0u16; (len + 1) as usize];
+                    let read = GetWindowTextW(hwnd, &mut buf);
+                    let title = String::from_utf16_lossy(&buf[..read as usize]);
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                    let mut proc_name = String::new();
+                    if pid != 0 {
+                        if let Ok(handle) =
+                            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                        {
+                            let mut img_buf = [0u16; 512];
+                            let img_len = GetProcessImageFileNameW(handle, &mut img_buf);
+                            let _ = CloseHandle(handle);
+                            if img_len > 0 {
+                                let full = String::from_utf16_lossy(&img_buf[..img_len as usize]);
+                                let fname = full.rsplit('\\').next().unwrap_or(&full);
+                                proc_name = fname.to_lowercase();
+                            }
+                        }
+                    }
+                    list.push((title, proc_name));
+                }
+            }
+            BOOL(1)
+        }
+
+        let mut result = Vec::new();
+        unsafe {
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut result as *mut _ as isize));
+        }
+        result
+    }
+    #[cfg(not(windows))]
+    {
+        vec![("Desktop".to_string(), "explorer.exe".to_string())]
+    }
+}
+
 impl ComputerUseAgentLoop {
     /// Executes the autonomous Mode A loop until completion, failure, or cancellation.
     pub async fn run(&self, goal: &str) -> TaskStatus {

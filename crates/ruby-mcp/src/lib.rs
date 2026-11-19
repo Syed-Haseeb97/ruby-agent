@@ -717,6 +717,8 @@ pub struct PolicyGatedToolManager {
     confirmations: Arc<UnifiedConfirmationManager>,
     registry: Arc<Mutex<McpRegistry>>,
     active_clients: ActiveMcpClients,
+    memory_store: Arc<tokio::sync::Mutex<Option<Arc<dyn ruby_memory::MemoryStore>>>>,
+    last_activity: Arc<tokio::sync::Mutex<std::time::Instant>>,
 }
 
 impl PolicyGatedToolManager {
@@ -730,6 +732,8 @@ impl PolicyGatedToolManager {
             confirmations: Arc::new(UnifiedConfirmationManager::new()),
             registry: Arc::new(Mutex::new(McpRegistry::default())),
             active_clients: Arc::new(Mutex::new(HashMap::new())),
+            memory_store: Arc::new(tokio::sync::Mutex::new(None)),
+            last_activity: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
         }
     }
 
@@ -744,6 +748,8 @@ impl PolicyGatedToolManager {
             confirmations,
             registry: Arc::new(Mutex::new(McpRegistry::default())),
             active_clients: Arc::new(Mutex::new(HashMap::new())),
+            memory_store: Arc::new(tokio::sync::Mutex::new(None)),
+            last_activity: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
         }
     }
 
@@ -759,7 +765,13 @@ impl PolicyGatedToolManager {
             confirmations,
             registry,
             active_clients: Arc::new(Mutex::new(HashMap::new())),
+            memory_store: Arc::new(tokio::sync::Mutex::new(None)),
+            last_activity: Arc::new(tokio::sync::Mutex::new(std::time::Instant::now())),
         }
+    }
+
+    pub async fn set_memory_store(&self, store: Arc<dyn ruby_memory::MemoryStore>) {
+        *self.memory_store.lock().await = Some(store);
     }
 
     pub fn confirmation_manager(&self) -> Arc<UnifiedConfirmationManager> {
@@ -814,6 +826,8 @@ impl PolicyGatedToolManager {
         tool_name: &str,
         args: serde_json::Value,
     ) -> Result<String, McpError> {
+        *self.last_activity.lock().await = std::time::Instant::now();
+
         // 1. Fail-closed policy validation
         let risk = self.policy.validate_tool_call(server, tool_name, &args)?;
 
@@ -833,6 +847,20 @@ impl PolicyGatedToolManager {
         // 3. Dispatch to appropriate client
         if server.eq_ignore_ascii_case("playwright") {
             self.playwright.call_tool(tool_name, args).await
+        } else if server.eq_ignore_ascii_case("memory") {
+            let store_opt = self.memory_store.lock().await.clone();
+            if let Some(store) = store_opt {
+                if tool_name == "search_memories" {
+                    let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                    let entries = store
+                        .search_memories(q, 5)
+                        .map_err(|e| McpError::Process(e.to_string()))?;
+                    return Ok(ruby_memory::format_memories_as_passive_data(&entries));
+                }
+            }
+            Err(McpError::Process(format!(
+                "Memory store is not initialized or tool '{tool_name}' is not supported"
+            )))
         } else if let Some(client_lock) = self.get_or_create_client(server).await? {
             let mut client = client_lock.lock().await;
             client.call_tool(tool_name, args).await
@@ -845,6 +873,7 @@ impl PolicyGatedToolManager {
 
     /// Confirms and executes a pending action via its 4-digit code.
     pub async fn confirm_and_execute(&self, code: &str) -> Result<String, McpError> {
+        *self.last_activity.lock().await = std::time::Instant::now();
         let action = self
             .confirmations
             .verify_and_consume(code)
@@ -854,6 +883,34 @@ impl PolicyGatedToolManager {
             self.playwright
                 .call_tool(&action.tool_name, action.arguments)
                 .await
+        } else if action.server.eq_ignore_ascii_case("memory") {
+            let store_opt = self.memory_store.lock().await.clone();
+            if let Some(store) = store_opt {
+                if action.tool_name == "delete_memory" {
+                    let id = action
+                        .arguments
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let deleted = store
+                        .delete_memory(id)
+                        .map_err(|e| McpError::Process(e.to_string()))?;
+                    return Ok(format!(
+                        "Memory record [ID: {id}] deleted (success: {deleted})"
+                    ));
+                } else if action.tool_name == "wipe_all" {
+                    let count = store
+                        .wipe_all()
+                        .map_err(|e| McpError::Process(e.to_string()))?;
+                    return Ok(format!(
+                        "All memories wiped (total {count} records removed)"
+                    ));
+                }
+            }
+            Err(McpError::Process(format!(
+                "Memory store is not initialized or tool '{}' is not supported",
+                action.tool_name
+            )))
         } else if let Some(client_lock) = self.get_or_create_client(&action.server).await? {
             let mut client = client_lock.lock().await;
             client.call_tool(&action.tool_name, action.arguments).await
@@ -862,6 +919,21 @@ impl PolicyGatedToolManager {
                 "MCP server '{}' is not registered or tool '{}' is not supported",
                 action.server, action.tool_name
             )))
+        }
+    }
+
+    /// Checks if the manager has been idle past the threshold, and if so, stops all clients and sidecars.
+    pub async fn check_idle_and_stop_at(
+        &self,
+        current_time: std::time::Instant,
+        idle_timeout: std::time::Duration,
+    ) -> Result<bool, McpError> {
+        let last = *self.last_activity.lock().await;
+        if current_time.duration_since(last) >= idle_timeout {
+            self.stop_all().await?;
+            Ok(true)
+        } else {
+            Ok(false)
         }
     }
 
@@ -1031,6 +1103,118 @@ mod tests {
                 assert!(msg.contains("MCP server closed stdout") || msg.contains("exited"));
             }
             other => panic!("Expected McpError::Process, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_1mb_bounded_read_kills_child_on_oversize_line() {
+        // Launch a command that emits 1.1 MB without newline
+        let mut client = StdioMcpClient::new(
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[Console]::Out.Write('A' * 1100000); Start-Sleep -Seconds 5".into(),
+            ],
+            HashMap::new(),
+            5,
+        );
+
+        let res = client.call_tool("huge_tool", serde_json::json!({})).await;
+        assert!(res.is_err(), "Must reject >1MB line");
+        match res.unwrap_err() {
+            McpError::Process(msg) => {
+                assert!(
+                    msg.contains("exceeded 1048576 byte limit") || msg.contains("process killed"),
+                    "Expected 1MB line cap error, got: {}",
+                    msg
+                );
+            }
+            other => panic!("Expected McpError::Process, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_idle_shutdown_with_controllable_clock() {
+        let policy = Arc::new(DefaultToolSecurityPolicy::default());
+        let sidecar = Arc::new(PlaywrightSidecarManager::new(
+            McpRegistry::default_playwright_config(),
+        ));
+        let manager = PolicyGatedToolManager::new(policy, sidecar);
+        manager
+            .register_client("fs", Box::new(MockMcpClient::new("ok")))
+            .await;
+
+        let start = std::time::Instant::now();
+        // 1. Not idle yet (10s elapsed, threshold 60s)
+        let stopped_early = manager
+            .check_idle_and_stop_at(
+                start + std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(!stopped_early);
+
+        // 2. Idle threshold exceeded (70s elapsed, threshold 60s)
+        let stopped = manager
+            .check_idle_and_stop_at(
+                start + std::time::Duration::from_secs(70),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        assert!(stopped);
+        assert_eq!(manager.active_clients.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_model_driven_memory_delete_and_wipe_require_confirmation() {
+        use ruby_memory::{MemoryStore, SqliteMemoryStore};
+
+        let policy = Arc::new(DefaultToolSecurityPolicy::default());
+        let sidecar = Arc::new(PlaywrightSidecarManager::new(
+            McpRegistry::default_playwright_config(),
+        ));
+        let manager = PolicyGatedToolManager::new(policy, sidecar);
+
+        let mem_store = Arc::new(SqliteMemoryStore::open_in_memory().unwrap());
+        let id1 = mem_store.add_memory("fact", "Memory 1 to delete").unwrap();
+        let _id2 = mem_store.add_memory("fact", "Memory 2 to wipe").unwrap();
+        manager.set_memory_store(mem_store.clone()).await;
+
+        // 1. Model requests delete_memory -> requires confirmation
+        let del_res = manager
+            .execute_tool("memory", "delete_memory", serde_json::json!({ "id": id1 }))
+            .await;
+        match del_res {
+            Err(McpError::RequiresConfirmation {
+                code, tool_name, ..
+            }) => {
+                assert_eq!(tool_name, "delete_memory");
+                assert_eq!(code.len(), 4);
+                // Confirm with code
+                let output = manager.confirm_and_execute(&code).await.unwrap();
+                assert!(output.contains("deleted"));
+            }
+            other => panic!("Expected RequiresConfirmation, got {:?}", other),
+        }
+
+        // 2. Model requests wipe_all -> requires confirmation
+        let wipe_res = manager
+            .execute_tool("memory", "wipe_all", serde_json::json!({}))
+            .await;
+        match wipe_res {
+            Err(McpError::RequiresConfirmation {
+                code, tool_name, ..
+            }) => {
+                assert_eq!(tool_name, "wipe_all");
+                assert_eq!(code.len(), 4);
+                // Confirm with code
+                let output = manager.confirm_and_execute(&code).await.unwrap();
+                assert!(output.contains("wiped"));
+            }
+            other => panic!("Expected RequiresConfirmation, got {:?}", other),
         }
     }
 }

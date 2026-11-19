@@ -212,6 +212,7 @@ async fn test_unknown_sender_ignored_silently() {
         keep_awake: false,
         paired_user_id: Some(12345), // Paired to 12345
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let adapter = TelegramAdapter::with_components(
@@ -268,6 +269,7 @@ async fn test_pairing_flow_success_expiry_and_wrong_code() {
         keep_awake: false,
         paired_user_id: None, // Unpaired
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let pairing_mgr = PairingManager::new();
@@ -365,6 +367,7 @@ async fn test_stale_message_dropped() {
         keep_awake: false,
         paired_user_id: Some(77777),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let task_mgr = TaskManager::new();
@@ -444,6 +447,7 @@ async fn test_stop_cancels_all_active_tasks() {
         keep_awake: false,
         paired_user_id: Some(88888),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let task_mgr = TaskManager::new();
@@ -502,6 +506,7 @@ async fn test_confirmation_plumbing() {
         keep_awake: false,
         paired_user_id: Some(99990),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let confirmation_mgr = ConfirmationManager::new();
@@ -619,6 +624,7 @@ async fn test_telegram_do_command_and_consequential_confirmation() {
         keep_awake: false,
         paired_user_id: Some(88888),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let task_mgr = TaskManager::new();
@@ -703,6 +709,7 @@ async fn test_telegram_do_refuses_when_computer_use_disabled() {
         keep_awake: false,
         paired_user_id: Some(88888),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let task_mgr = TaskManager::new();
@@ -757,6 +764,7 @@ async fn test_m4_consequential_confirmation_uses_unified_confirmation_manager() 
         keep_awake: false,
         paired_user_id: Some(77777),
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let task_mgr = TaskManager::new();
@@ -823,6 +831,7 @@ fn test_remote_off_when_no_token_or_disabled() {
         keep_awake: false,
         paired_user_id: None,
         allowed_roots: vec![],
+        ..Default::default()
     };
     assert!(!config.enabled);
 
@@ -848,6 +857,7 @@ async fn test_pairing_failed_attempts_capped_at_five() {
         keep_awake: false,
         paired_user_id: None,
         allowed_roots: vec![],
+        ..Default::default()
     }));
 
     let pairing_mgr = PairingManager::new();
@@ -1135,9 +1145,9 @@ async fn test_telegram_background_job_commands_lifecycle() {
     assert!(cancel_resp.contains("cancelled"));
 }
 
-// 12. Phase R2: /screen command success sends photo and logs audit
+// 12. Phase R2: /screen refuses when allow_screenshots is false (default)
 #[tokio::test]
-async fn test_telegram_screen_command_success() {
+async fn test_telegram_screen_command_refuses_when_disabled() {
     let mock = MockTelegramServer::start().await;
     let temp_dir = tempfile::tempdir().unwrap();
     let audit_file = temp_dir.path().join("audit.log");
@@ -1147,11 +1157,13 @@ async fn test_telegram_screen_command_success() {
         mock.base_url.clone(),
     ));
 
+    // allow_screenshots is false by default
     let config = Arc::new(Mutex::new(RemoteConfig {
         enabled: true,
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: false,
     }));
 
     let adapter = TelegramAdapter::with_components(
@@ -1185,19 +1197,126 @@ async fn test_telegram_screen_command_success() {
     let res = adapter.process_update(update, now).await.unwrap();
     assert_eq!(res, Some(3001));
 
+    // Assert photo was NOT sent
+    let photos = mock.sent_photos.lock().unwrap();
+    assert_eq!(photos.len(), 0);
+
+    // Verify rejection message
+    let msgs = mock.sent_messages.lock().unwrap();
+    let reply = msgs[0]["text"].as_str().unwrap();
+    assert!(reply.contains("Screen capture is disabled in configuration"));
+
+    // Verify audit log
+    let audit_content = std::fs::read_to_string(&audit_file).unwrap();
+    assert!(audit_content.contains("cmd=screen"));
+    assert!(audit_content.contains("outcome=refused_disabled"));
+}
+
+// 12b. Phase R2: /screen when enabled requests confirmation with E2EE warning, and /yes sends photo
+#[tokio::test]
+async fn test_telegram_screen_command_confirmation_flow_and_photo_dispatch() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+        allow_screenshots: true,
+    }));
+
+    let confirmation_mgr = ConfirmationManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        confirmation_mgr.clone(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let capturer = Arc::new(MockRemoteScreenCapturer::default());
+    adapter.set_screen_capturer(capturer);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 1. Send /screen -> must trigger confirmation prompt with E2EE disclosure
+    let update = serde_json::json!({
+        "update_id": 3001,
+        "message": {
+            "message_id": 501,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345, "first_name": "Owner" },
+            "text": "/screen"
+        }
+    });
+
+    let res = adapter.process_update(update, now).await.unwrap();
+    assert_eq!(res, Some(3001));
+
+    // Confirm that photos have NOT been sent yet
+    assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
+
+    // Extract confirmation prompt and code
+    let (prompt, code_str) = {
+        let msgs = mock.sent_messages.lock().unwrap();
+        let p = msgs[0]["text"].as_str().unwrap().to_string();
+        let c = p
+            .split("/yes ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("Prompt must contain confirmation code")
+            .to_string();
+        (p, c)
+    };
+    assert!(prompt.contains("Confirm remote screen capture?"));
+    assert!(prompt.contains("Telegram bot messages are not end-to-end encrypted"));
+    assert!(prompt.contains("/yes"));
+    assert_eq!(code_str.len(), 4);
+
+    // 2. User confirms with /yes <code>
+    let confirm_update = serde_json::json!({
+        "update_id": 3002,
+        "message": {
+            "message_id": 502,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": format!("/yes {code_str}")
+        }
+    });
+
+    let res2 = adapter.process_update(confirm_update, now).await.unwrap();
+    assert_eq!(res2, Some(3002));
+
     // Assert photo was dispatched to mock Telegram server
     let photos = mock.sent_photos.lock().unwrap();
     assert_eq!(photos.len(), 1, "Expected exactly 1 sendPhoto call");
     assert!(photos[0].contains("screen.jpg"));
     assert!(photos[0].contains("1920x1080"));
 
-    // Verify audit log
+    // Verify audit log contains metadata, never image data
     let audit_content = std::fs::read_to_string(&audit_file).unwrap();
     assert!(audit_content.contains("cmd=screen"));
+    assert!(audit_content.contains("pending_confirmation"));
     assert!(audit_content.contains("outcome=success"));
+    assert!(!audit_content.contains("JFIF"));
+    assert!(!audit_content.contains("base64"));
+    assert!(!audit_content.contains("image/jpeg"));
 }
 
-// 13. Phase R2: /screen refuses capture when Windows session is locked
+// 13. Phase R2: /screen confirmed capture refuses when Windows session is locked
 #[tokio::test]
 async fn test_telegram_screen_command_session_locked_refusal() {
     let mock = MockTelegramServer::start().await;
@@ -1214,14 +1333,16 @@ async fn test_telegram_screen_command_session_locked_refusal() {
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: true,
     }));
 
+    let confirmation_mgr = ConfirmationManager::new();
     let adapter = TelegramAdapter::with_components(
         client,
         config,
         PairingManager::new(),
         TaskManager::new(),
-        ConfirmationManager::new(),
+        confirmation_mgr.clone(),
         AuditLogger::new(audit_file.clone()),
     );
 
@@ -1236,36 +1357,55 @@ async fn test_telegram_screen_command_session_locked_refusal() {
         .unwrap()
         .as_secs();
 
+    // 1. Request capture
     let update = serde_json::json!({
-        "update_id": 3002,
+        "update_id": 3004,
         "message": {
-            "message_id": 502,
+            "message_id": 504,
             "date": now,
             "chat": { "id": 12345, "type": "private" },
             "from": { "id": 12345 },
             "text": "/screen"
         }
     });
+    let _ = adapter.process_update(update, now).await.unwrap();
 
-    let res = adapter.process_update(update, now).await.unwrap();
-    assert_eq!(res, Some(3002));
+    let code_str = {
+        let msgs = mock.sent_messages.lock().unwrap();
+        let prompt = msgs[0]["text"].as_str().unwrap();
+        prompt
+            .split("/yes ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap()
+            .to_string()
+    };
 
-    // Zero photos sent
+    // 2. Confirm -> session locked triggers refusal
+    let confirm_update = serde_json::json!({
+        "update_id": 3005,
+        "message": {
+            "message_id": 505,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": format!("/yes {code_str}")
+        }
+    });
+    let _ = adapter.process_update(confirm_update, now).await.unwrap();
+
     assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
 
-    // Refusal reply sent
-    let msgs = mock.sent_messages.lock().unwrap();
-    assert_eq!(msgs.len(), 1);
-    let reply = msgs[0]["text"].as_str().unwrap();
-    assert!(reply.contains("Screen capture refused: Windows session is locked"));
+    let msgs2 = mock.sent_messages.lock().unwrap();
+    let reply = msgs2.last().unwrap()["text"].as_str().unwrap();
+    assert!(reply.contains("Windows session is locked"));
 
-    // Audit log verifies refusal
     let audit_content = std::fs::read_to_string(&audit_file).unwrap();
     assert!(audit_content.contains("cmd=screen"));
-    assert!(audit_content.contains("outcome=refused_windows_session_is_locked"));
+    assert!(audit_content.contains("refused_windows_session_is_locked"));
 }
 
-// 14. Phase R2: /screen refuses capture when elevated or secure desktop active
+// 14. Phase R2: /screen confirmed capture refuses when elevated or secure desktop active
 #[tokio::test]
 async fn test_telegram_screen_command_elevated_or_secure_desktop_refusal() {
     let mock = MockTelegramServer::start().await;
@@ -1282,14 +1422,16 @@ async fn test_telegram_screen_command_elevated_or_secure_desktop_refusal() {
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: true,
     }));
 
+    let confirmation_mgr = ConfirmationManager::new();
     let adapter = TelegramAdapter::with_components(
         client,
         config,
         PairingManager::new(),
         TaskManager::new(),
-        ConfirmationManager::new(),
+        confirmation_mgr.clone(),
         AuditLogger::new(audit_file.clone()),
     );
 
@@ -1305,29 +1447,50 @@ async fn test_telegram_screen_command_elevated_or_secure_desktop_refusal() {
         .as_secs();
 
     let update = serde_json::json!({
-        "update_id": 3003,
+        "update_id": 3006,
         "message": {
-            "message_id": 503,
+            "message_id": 506,
             "date": now,
             "chat": { "id": 12345, "type": "private" },
             "from": { "id": 12345 },
             "text": "/screen"
         }
     });
+    let _ = adapter.process_update(update, now).await.unwrap();
 
-    let res = adapter.process_update(update, now).await.unwrap();
-    assert_eq!(res, Some(3003));
+    let code_str = {
+        let msgs = mock.sent_messages.lock().unwrap();
+        let prompt = msgs[0]["text"].as_str().unwrap();
+        prompt
+            .split("/yes ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap()
+            .to_string()
+    };
+
+    let confirm_update = serde_json::json!({
+        "update_id": 3007,
+        "message": {
+            "message_id": 507,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": format!("/yes {code_str}")
+        }
+    });
+    let _ = adapter.process_update(confirm_update, now).await.unwrap();
 
     assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
 
-    let msgs = mock.sent_messages.lock().unwrap();
-    let reply = msgs[0]["text"].as_str().unwrap();
+    let msgs2 = mock.sent_messages.lock().unwrap();
+    let reply = msgs2.last().unwrap()["text"].as_str().unwrap();
     assert!(reply.contains("Secure desktop or elevated process active"));
 }
 
-// 15. Phase R2: /screen refuses capture when foreground window is in security denylist
+// 15. Phase R2: /screen confirmed capture refuses when visible window is in security denylist
 #[tokio::test]
-async fn test_telegram_screen_command_denylist_refusal() {
+async fn test_telegram_screen_command_visible_denylist_refusal() {
     let mock = MockTelegramServer::start().await;
     let temp_dir = tempfile::tempdir().unwrap();
     let audit_file = temp_dir.path().join("audit.log");
@@ -1342,19 +1505,24 @@ async fn test_telegram_screen_command_denylist_refusal() {
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: true,
     }));
 
+    let confirmation_mgr = ConfirmationManager::new();
     let adapter = TelegramAdapter::with_components(
         client,
         config,
         PairingManager::new(),
         TaskManager::new(),
-        ConfirmationManager::new(),
+        confirmation_mgr.clone(),
         AuditLogger::new(audit_file.clone()),
     );
 
     let mock_cap = MockRemoteScreenCapturer {
-        denylisted_window: true,
+        visible_windows: vec![
+            ("Visual Studio Code".into(), "code.exe".into()),
+            ("KeePass Password Safe".into(), "keepass.exe".into()),
+        ],
         ..Default::default()
     };
     adapter.set_screen_capturer(Arc::new(mock_cap));
@@ -1365,23 +1533,44 @@ async fn test_telegram_screen_command_denylist_refusal() {
         .as_secs();
 
     let update = serde_json::json!({
-        "update_id": 3004,
+        "update_id": 3008,
         "message": {
-            "message_id": 504,
+            "message_id": 508,
             "date": now,
             "chat": { "id": 12345, "type": "private" },
             "from": { "id": 12345 },
             "text": "/screen"
         }
     });
+    let _ = adapter.process_update(update, now).await.unwrap();
 
-    let res = adapter.process_update(update, now).await.unwrap();
-    assert_eq!(res, Some(3004));
+    let code_str = {
+        let msgs = mock.sent_messages.lock().unwrap();
+        let prompt = msgs[0]["text"].as_str().unwrap();
+        prompt
+            .split("/yes ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap()
+            .to_string()
+    };
+
+    let confirm_update = serde_json::json!({
+        "update_id": 3009,
+        "message": {
+            "message_id": 509,
+            "date": now,
+            "chat": { "id": 12345, "type": "private" },
+            "from": { "id": 12345 },
+            "text": format!("/yes {code_str}")
+        }
+    });
+    let _ = adapter.process_update(confirm_update, now).await.unwrap();
 
     assert_eq!(mock.sent_photos.lock().unwrap().len(), 0);
 
-    let msgs = mock.sent_messages.lock().unwrap();
-    let reply = msgs[0]["text"].as_str().unwrap();
+    let msgs2 = mock.sent_messages.lock().unwrap();
+    let reply = msgs2.last().unwrap()["text"].as_str().unwrap();
     assert!(reply.contains("security denylist"));
 }
 
@@ -1402,6 +1591,7 @@ async fn test_telegram_screen_command_uninitialized() {
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: true,
     }));
 
     let adapter = TelegramAdapter::with_components(
@@ -1440,7 +1630,7 @@ async fn test_telegram_screen_command_uninitialized() {
     assert!(reply.contains("Screen capture is not initialized"));
 }
 
-// 17. Phase R2: DefaultRemoteScreenCapturer hermetic verification of locks, elevation, and denylist
+// 17. Phase R2: DefaultRemoteScreenCapturer hermetic verification of locks, elevation, and full desktop denylist
 #[tokio::test]
 async fn test_default_remote_screen_capturer_denylist_and_locks() {
     let mock_executor = Arc::new(MockComputerUseExecutor::default());
@@ -1453,6 +1643,10 @@ async fn test_default_remote_screen_capturer_denylist_and_locks() {
 
     // 1. Clean state -> Success
     capturer.set_window_override("Visual Studio Code", "code.exe");
+    capturer.set_visible_windows_override(vec![
+        ("Visual Studio Code".into(), "code.exe".into()),
+        ("Terminal".into(), "powershell.exe".into()),
+    ]);
     let res = capturer.capture_screen().await;
     assert!(res.is_ok(), "Clean state must succeed: {:?}", res.err());
     let captured = res.unwrap();
@@ -1460,21 +1654,29 @@ async fn test_default_remote_screen_capturer_denylist_and_locks() {
     assert_eq!(captured.height, 1080);
     assert!(!captured.data.is_empty());
 
-    // 2. Denylisted window: built-in (1Password)
-    capturer.set_window_override("1Password - Vault", "1password.exe");
+    // 2. Denylisted window: built-in (1Password) as background visible window
+    capturer.set_window_override("Untitled - Notepad", "notepad.exe");
+    capturer.set_visible_windows_override(vec![
+        ("Untitled - Notepad".into(), "notepad.exe".into()),
+        ("1Password - Vault".into(), "1password.exe".into()),
+    ]);
     let res_denied_builtin = capturer.capture_screen().await;
     assert!(res_denied_builtin.is_err());
     assert!(res_denied_builtin
         .unwrap_err()
         .contains("security denylist"));
 
-    // 3. Denylisted window: custom entry (CustomBank)
-    capturer.set_window_override("My Bank Portal", "custombank.exe");
+    // 3. Denylisted window: custom entry (CustomBank) as background visible window
+    capturer.set_visible_windows_override(vec![
+        ("Untitled - Notepad".into(), "notepad.exe".into()),
+        ("My Bank Portal".into(), "custombank.exe".into()),
+    ]);
     let res_denied_custom = capturer.capture_screen().await;
     assert!(res_denied_custom.is_err());
     assert!(res_denied_custom.unwrap_err().contains("security denylist"));
 
     // 4. Session locked
+    capturer.clear_visible_windows_override();
     capturer.set_window_override("Untitled - Notepad", "notepad.exe");
     let locked_inspector = MockPlatformSecurityInspector {
         session_locked: true,
@@ -1518,6 +1720,7 @@ async fn test_channel_adapter_send_file_routes_images_to_send_photo() {
         keep_awake: false,
         paired_user_id: Some(12345),
         allowed_roots: vec![],
+        allow_screenshots: true,
     }));
 
     let adapter = TelegramAdapter::with_components(

@@ -283,6 +283,8 @@ pub struct LocalToolBackend {
     workspace_root: PathBuf,
     allow_advanced_shell: bool,
     allowed_commands: Vec<String>,
+    confirmation_mgr: Arc<Mutex<Option<Arc<ruby_policy::UnifiedConfirmationManager>>>>,
+    confirmed_code: Arc<Mutex<Option<String>>>,
 }
 
 impl LocalToolBackend {
@@ -303,12 +305,26 @@ impl LocalToolBackend {
                 "cat".to_string(),
                 "test".to_string(),
             ],
+            confirmation_mgr: Arc::new(Mutex::new(None)),
+            confirmed_code: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_allowed_commands(mut self, cmds: Vec<String>) -> Self {
         self.allowed_commands = cmds;
         self
+    }
+
+    pub fn with_confirmation_manager(
+        self,
+        mgr: Arc<ruby_policy::UnifiedConfirmationManager>,
+    ) -> Self {
+        *self.confirmation_mgr.lock().unwrap() = Some(mgr);
+        self
+    }
+
+    pub fn set_confirmed_code(&self, code: &str) {
+        *self.confirmed_code.lock().unwrap() = Some(code.to_string());
     }
 
     /// Verifies that a path resides strictly within the workspace root without traversal.
@@ -466,6 +482,27 @@ impl ExecutionBackend for LocalToolBackend {
                     "Advanced shell execution refused: running under an elevated security token"
                         .to_string(),
                 ));
+            }
+
+            // 4. Per-command confirmation check
+            if let Some(ref mgr) = *self.confirmation_mgr.lock().unwrap() {
+                let pending_code = self.confirmed_code.lock().unwrap().take();
+                if let Some(code) = pending_code {
+                    mgr.verify_and_consume(&code).map_err(|e| {
+                        CoreError::Execution(format!("Confirmation verification failed: {e}"))
+                    })?;
+                } else {
+                    let desc = format!("Execute advanced shell command '{cmd}'");
+                    let code = mgr.register_action(
+                        "shell",
+                        "execute_command",
+                        serde_json::json!({ "cmd": cmd, "args": args }),
+                        &desc,
+                    );
+                    return Err(CoreError::Execution(format!(
+                        "Advanced shell requires confirmation: {desc}. Code: {code}"
+                    )));
+                }
             }
         }
 
@@ -743,6 +780,23 @@ impl BackgroundTaskSupervisor {
     pub fn get_logs(&self, id: Uuid) -> Result<Vec<String>, CoreError> {
         self.store.get_logs(id)
     }
+
+    /// Recovers interrupted background tasks left running when the system shutdown or restarted.
+    pub fn recover_interrupted_jobs(&self) -> Result<usize, CoreError> {
+        let jobs = self.store.list_jobs(100)?;
+        let mut count = 0;
+        for j in jobs {
+            if matches!(j.status, TaskStatus::Running | TaskStatus::Verifying) {
+                let _ = self.store.update_status(j.id, TaskStatus::Failed);
+                let _ = self.store.append_log(
+                    j.id,
+                    "Task was interrupted by system shutdown/restart (recovered on startup)",
+                );
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
 }
 
 // ─── Command Formatter for /jobs, /job, /cancel, /logs ────────────────────────
@@ -976,5 +1030,66 @@ mod tests {
         // /cancel <id>
         let cancel_out = handle_background_command(&supervisor, "/cancel", &j1.id.to_string());
         assert!(cancel_out.contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_advanced_shell_per_command_confirmation() {
+        let temp = tempfile::tempdir().unwrap();
+        let conf_mgr = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
+        let backend = LocalToolBackend::new(temp.path().to_path_buf(), true)
+            .with_confirmation_manager(conf_mgr.clone());
+
+        // 1. Unconfirmed command execution triggers Requires confirmation
+        let res = backend.execute_command("whoami", &[]).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("Advanced shell requires confirmation"));
+        assert!(err_msg.contains("Code:"));
+
+        // Extract code
+        let code = err_msg.split("Code: ").nth(1).unwrap().trim();
+        assert_eq!(code.len(), 4);
+
+        // 2. Set confirmed code and execute
+        backend.set_confirmed_code(code);
+        let res2 = backend.execute_command("whoami", &[]).await;
+        assert!(res2.is_ok(), "Confirmed command must succeed: {:?}", res2);
+    }
+
+    #[tokio::test]
+    async fn test_background_supervisor_restart_recovery() {
+        let store = Arc::new(SqliteJobStore::new_in_memory().unwrap());
+        let backend = Arc::new(MockBackend);
+        let supervisor = BackgroundTaskSupervisor::new(store.clone(), backend, 60);
+
+        // Create a job that was left running during crash
+        let job = store.create_job("Interrupted job").unwrap();
+        store.update_status(job.id, TaskStatus::Running).unwrap();
+
+        // Run recovery
+        let recovered = supervisor.recover_interrupted_jobs().unwrap();
+        assert_eq!(recovered, 1);
+
+        let job_after = store.get_job(job.id).unwrap().unwrap();
+        assert_eq!(job_after.status, TaskStatus::Failed);
+        let logs = store.get_logs(job.id).unwrap();
+        assert!(logs
+            .iter()
+            .any(|l| l.contains("interrupted by system shutdown/restart")));
+    }
+
+    #[tokio::test]
+    async fn test_background_supervisor_concurrency_limit() {
+        let store = Arc::new(SqliteJobStore::new_in_memory().unwrap());
+        let backend = Arc::new(MockBackend);
+        // Strict concurrency limit of 1
+        let supervisor =
+            BackgroundTaskSupervisor::with_concurrency_limit(store.clone(), backend, 60, 1);
+
+        let t1 = supervisor.submit("Task 1").await.unwrap();
+        let t2 = supervisor.submit("Task 2").await.unwrap();
+
+        assert_eq!(t1.status, TaskStatus::Queued);
+        assert_eq!(t2.status, TaskStatus::Queued);
     }
 }

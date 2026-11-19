@@ -3,6 +3,7 @@
 //! screen clicks, startup registration, and chained multi-step commands.
 
 pub mod computer_use;
+pub mod screen_recorder;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -110,8 +111,24 @@ impl AllowlistedActionExecutor {
     /// Executes a command with timeout and caps output length to 64 KB.
     /// Uses Windows Job Object to guarantee the entire process tree is terminated on timeout.
     pub async fn run_command_with_timeout_and_cap(
+        cmd: std::process::Command,
+        desc: &str,
+    ) -> Result<String, ActionError> {
+        Self::run_command_with_custom_timeout_and_cap(
+            cmd,
+            desc,
+            Self::GIT_EXECUTION_TIMEOUT,
+            Self::MAX_COMMAND_OUTPUT_BYTES,
+        )
+        .await
+    }
+
+    /// Executes a command with configurable timeout and output cap, enforcing Job Object tree termination.
+    pub async fn run_command_with_custom_timeout_and_cap(
         mut cmd: std::process::Command,
         desc: &str,
+        timeout_duration: Duration,
+        max_output_bytes: usize,
     ) -> Result<String, ActionError> {
         use std::os::windows::io::AsRawHandle;
         let job = ruby_platform::JobObjectProcessTree::new().ok();
@@ -128,7 +145,7 @@ impl AllowlistedActionExecutor {
 
         let wait_fut = tokio::task::spawn_blocking(move || child.wait_with_output());
 
-        let output = match tokio::time::timeout(Self::GIT_EXECUTION_TIMEOUT, wait_fut).await {
+        let output = match tokio::time::timeout(timeout_duration, wait_fut).await {
             Ok(join_res) => join_res
                 .map_err(|e| ActionError::Failed(format!("Failed to join task for {desc}: {e}")))?
                 .map_err(|e| ActionError::Failed(format!("{desc} failed: {e}")))?,
@@ -138,14 +155,14 @@ impl AllowlistedActionExecutor {
                 }
                 return Err(ActionError::Failed(format!(
                     "{desc} timed out after {:?} (process tree killed)",
-                    Self::GIT_EXECUTION_TIMEOUT
+                    timeout_duration
                 )));
             }
         };
 
         let mut stdout_bytes = output.stdout;
-        let is_truncated = if stdout_bytes.len() > Self::MAX_COMMAND_OUTPUT_BYTES {
-            stdout_bytes.truncate(Self::MAX_COMMAND_OUTPUT_BYTES);
+        let is_truncated = if stdout_bytes.len() > max_output_bytes {
+            stdout_bytes.truncate(max_output_bytes);
             true
         } else {
             false
@@ -737,5 +754,34 @@ mod tests {
             !marker_file.exists(),
             "CRITICAL: core.fsmonitor marker was executed! Hardening failed."
         );
+    }
+
+    #[tokio::test]
+    async fn test_git_helper_timeout_kills_process_tree() {
+        // cmd.exe spawns powershell.exe which sleeps for 10s
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.args([
+            "/c",
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Start-Sleep -Seconds 10",
+        ]);
+
+        let res = AllowlistedActionExecutor::run_command_with_custom_timeout_and_cap(
+            cmd,
+            "test_tree_kill",
+            Duration::from_millis(300),
+            65536,
+        )
+        .await;
+
+        assert!(res.is_err(), "Must time out and kill process tree");
+        match res.unwrap_err() {
+            ActionError::Failed(msg) => {
+                assert!(msg.contains("timed out after") && msg.contains("process tree killed"));
+            }
+            other => panic!("Expected ActionError::Failed, got {:?}", other),
+        }
     }
 }

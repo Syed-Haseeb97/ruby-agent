@@ -99,7 +99,68 @@ pub fn validate_memory_text(text: &str) -> Result<(), MemoryError> {
         }
     }
 
-    // 5. Raw audio base64 or audio header
+    // 5. GitHub Personal Access Tokens (ghp_, github_pat_, etc.)
+    if text.contains("ghp_")
+        || text.contains("github_pat_")
+        || text.contains("gho_")
+        || text.contains("ghs_")
+    {
+        for word in text.split_whitespace() {
+            if word.starts_with("ghp_") && word.len() >= 20
+                || word.starts_with("github_pat_") && word.len() >= 25
+                || word.starts_with("gho_") && word.len() >= 20
+                || word.starts_with("ghs_") && word.len() >= 20
+            {
+                return Err(MemoryError::RefusedSensitiveContent(
+                    "GitHub Personal Access Token detected".into(),
+                ));
+            }
+        }
+    }
+
+    // 6. Private Key Headers
+    if text.contains("BEGIN") && text.contains("PRIVATE KEY") {
+        return Err(MemoryError::RefusedSensitiveContent(
+            "Private key header detected".into(),
+        ));
+    }
+
+    // 7. AWS Access Key IDs
+    for word in text.split_whitespace() {
+        if word.starts_with("AKIA")
+            && word.len() == 20
+            && word.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(MemoryError::RefusedSensitiveContent(
+                "AWS Access Key ID detected".into(),
+            ));
+        }
+    }
+
+    // 8. Key-value credential definitions
+    let text_lower = text.to_ascii_lowercase();
+    if text_lower.contains("api_key=")
+        || text_lower.contains("apikey=")
+        || text_lower.contains("secret=")
+        || text_lower.contains("password=")
+    {
+        for line in text_lower.lines() {
+            for prefix in &["api_key=", "apikey=", "secret=", "password="] {
+                if let Some(pos) = line.find(prefix) {
+                    let val = line[pos + prefix.len()..]
+                        .trim()
+                        .trim_matches(|c| c == '\'' || c == '"');
+                    if val.len() >= 8 && !val.contains(' ') {
+                        return Err(MemoryError::RefusedSensitiveContent(
+                            "Hardcoded secret/credential assignment detected".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // 9. Raw audio base64 or audio header
     if text.contains("data:audio/") || text.contains("RIFF") && text.contains("WAVE") {
         return Err(MemoryError::RefusedSensitiveContent(
             "Raw audio payload detected".into(),
@@ -444,6 +505,59 @@ mod tests {
         assert!(passive.starts_with("[MEMORY_DATA]"));
         assert!(passive.ends_with("[/MEMORY_DATA]"));
         assert!(passive.contains("Ignore previous instructions"));
+    }
+
+    #[test]
+    fn test_refuse_github_pat() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let pat = format!("My token is ghp_{}", "1234567890abcdefghijklmnopqrstuvwxyz");
+        let res = store.add_memory("auth", &pat);
+        assert_eq!(
+            res,
+            Err(MemoryError::RefusedSensitiveContent(
+                "GitHub Personal Access Token detected".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_refuse_private_key_header() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let key_header = format!("BEGIN {} PRIVATE KEY", "RSA");
+        let key_data = format!("-----{key_header}-----\nMIIEowIBAAKCAQEA0");
+        let res = store.add_memory("cert", &key_data);
+        assert_eq!(
+            res,
+            Err(MemoryError::RefusedSensitiveContent(
+                "Private key header detected".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_refuse_aws_access_key() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let aws = "Access key: AKIAIOSFODNN7EXAMPLE for S3";
+        let res = store.add_memory("cloud", aws);
+        assert_eq!(
+            res,
+            Err(MemoryError::RefusedSensitiveContent(
+                "AWS Access Key ID detected".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_refuse_hardcoded_assignment() {
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let snippet = format!("config: {}='super_secret_production_key_123'", "api_key");
+        let res = store.add_memory("conf", &snippet);
+        assert_eq!(
+            res,
+            Err(MemoryError::RefusedSensitiveContent(
+                "Hardcoded secret/credential assignment detected".into()
+            ))
+        );
     }
 
     #[test]
