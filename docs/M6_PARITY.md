@@ -22,7 +22,7 @@ The original Python Ruby codebase implemented 16 major functional features ("F-f
 | **F9** | **MCP Client Extensibility** | Python `mcp` stdio client | **Ported (M3/F4)**<br>`ruby-mcp` + 1MB bounded read | High (untrusted servers) | Completed (M3/F4 with crash isolation & line caps) |
 | **F10** | **Long-term Memory** | SQLite + raw table queries | **Ported (M3)**<br>`ruby-memory` + sqlite + secret scan | High (credential retention) | Completed (M3 with secret rejection) |
 | **F11** | **Headless Browser Use** | Playwright Python (`playwright`) | **Ported (M3)**<br>Pinned @0.0.84 sidecar | High (SSRF/data exfil) | Completed (M3 with SSRF & isolated profile) |
-| **F12** | **Music & Media Playback** | Pygame mixer / sounddevice | **Pending (M6)** | Low | Phase 3 (Media convenience) |
+| **F12** | **Music & Media Playback** | Pygame mixer / sounddevice | **Ported (ruby-actions)**<br>MediaControl allowlist (play, pause, next, prev, volume) | Low | Completed (ruby-actions) |
 | **F13** | **System & App Launching** | `os.system` / `subprocess.Popen` | **Ported (M5/actions)**<br>Argv-only + allowlist + JobObject | High (command injection) | Completed (M5 allowlist backend) |
 | **F14** | **Clipboard Smart Paste** | `pyperclip` / `win32clipboard` | **Ported (ruby-platform)** | High (credential snooping) | Completed (platform clipboard) |
 | **F15** | **Calendar & Reminder Tasks** | Local JSON reminders loop | **Ported (M5)**<br>Durable SQLite task queue | Low | Completed (M5 background tasks) |
