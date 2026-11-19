@@ -63,3 +63,11 @@ ruby-remote = { path = "crates/ruby-remote" }
 [workspace.lints.cargo]
 unused_dependencies = "allow"
 unused_workspace_dependencies = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
