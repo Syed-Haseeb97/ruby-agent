@@ -105,13 +105,13 @@ impl ConfirmationManager {
     /// Returns the active pending action if not expired.
     pub fn get_active_pending(&self) -> Option<PendingAction> {
         self.inner
-            .get_pending_summary()
-            .map(|(desc, rem)| PendingAction {
-                action_id: "pending".into(),
-                code: "".into(),
-                description: desc,
-                created_at: Instant::now(),
-                expires_at: Instant::now() + rem,
+            .get_pending_action()
+            .map(|a| PendingAction {
+                action_id: a.id,
+                code: a.code,
+                description: a.description,
+                created_at: a.created_at,
+                expires_at: a.expires_at,
             })
     }
 }

@@ -720,6 +720,22 @@ impl TelegramAdapter {
                 };
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
+            "/quit" => {
+                let code = self
+                    .confirmation_mgr
+                    .register_action("remote_quit", "Remote Ruby Application Shutdown");
+                let expires = crate::confirmation::CONFIRMATION_TTL.as_secs();
+                self.audit_logger.log_entry(
+                    sender_id,
+                    None,
+                    "quit",
+                    "pending_confirmation",
+                );
+                let prompt = format!(
+                    "⚠️ Confirm remote Ruby application shutdown?\nNotice: This will terminate the Ruby process on the host machine.\nReply /yes {code} (expires in {expires}s) or /no to cancel."
+                );
+                self.send_redacted_reply(chat_id, &prompt).await?;
+            }
             "/yes" => {
                 let code = args;
                 if code.is_empty() {
@@ -740,6 +756,19 @@ impl TelegramAdapter {
                                     Some(format!("Confirmed: {}", action.description)),
                                     None,
                                 );
+                            }
+                            if action.description == "remote_quit"
+                                || action.description == "Remote Ruby Application Shutdown"
+                            {
+                                self.audit_logger
+                                    .log_entry(sender_id, None, "quit", "confirmed_shutdown");
+                                self.send_redacted_reply(
+                                    chat_id,
+                                    "🛑 Ruby application is shutting down gracefully. Goodbye.",
+                                )
+                                .await?;
+                                self.running.store(false, Ordering::SeqCst);
+                                return Ok(Some(update_id));
                             }
                             if action.description == "remote_screen_capture" {
                                 let capturer_opt = self.screen_capturer.lock().unwrap().clone();
@@ -964,6 +993,38 @@ impl TelegramAdapter {
         }
         Ok(())
     }
+
+    /// Handles desktop session lock changes.
+    /// On lock: pauses running Mode A tasks and notifies paired user via Telegram;
+    /// Mode B (background jobs) continues running.
+    pub async fn on_session_lock_changed(&self, is_locked: bool) -> Result<(), RemoteError> {
+        if is_locked {
+            let cu_active = self.is_computer_use_enabled();
+            if cu_active {
+                info!("Session locked: pausing Mode A Computer Use tasks");
+                let recent = self.task_mgr.get_recent_tasks(5);
+                for t in recent {
+                    if t.state == TaskState::Running {
+                        self.task_mgr.update_task_state(
+                            &t.id,
+                            TaskState::NeedsInput,
+                            Some("Paused: Desktop session locked".into()),
+                            None,
+                        );
+                    }
+                }
+                let config_guard = self.config.lock().unwrap();
+                if let Some(paired_id) = config_guard.paired_user_id {
+                    drop(config_guard);
+                    self.send_redacted_reply(
+                        paired_id,
+                        "⚠️ Desktop session locked: Mode A autonomous task paused for security. Mode B background tasks continue running.",
+                    ).await?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -987,10 +1048,26 @@ impl ChannelAdapter for TelegramAdapter {
             offset
         );
 
+        // L4: Startup announcement to paired chat if paired
+        let startup_paired_id = self.config.lock().ok().and_then(|c| c.paired_user_id);
+        if let Some(paired_id) = startup_paired_id {
+            let cu_on = self.computer_use_enabled.load(Ordering::SeqCst);
+            let msg = format!(
+                "Ruby online (v{}, mode_a: {}, shell: false)",
+                env!("CARGO_PKG_VERSION"),
+                if cu_on { "enabled" } else { "off" }
+            );
+            let _ = self.client.send_message(paired_id, &msg).await;
+        }
+
+        let mut backoff = Duration::from_millis(500);
+        let max_backoff = Duration::from_secs(60);
+
         while running.load(Ordering::SeqCst) {
             let res = client.get_updates(Some(offset), 25).await;
             match res {
                 Ok(val) => {
+                    backoff = Duration::from_millis(500);
                     if let Some(updates) = val["result"].as_array() {
                         let now_secs = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
@@ -1011,14 +1088,44 @@ impl ChannelAdapter for TelegramAdapter {
                         }
                     }
                 }
+                Err(RemoteError::Conflict409) => {
+                    warn!("Telegram 409 Conflict: Another poller is active. Pausing polling for 15s.");
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                }
+                Err(RemoteError::RateLimited429(retry_after)) => {
+                    warn!("Telegram 429 Too Many Requests: Rate limited; waiting {}s.", retry_after);
+                    tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                }
+                Err(RemoteError::TokenRevoked) => {
+                    error!("Telegram bot token revoked or invalid (401). Stopping polling permanently.");
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
                 Err(e) => {
                     if !running.load(Ordering::SeqCst) {
                         break;
                     }
-                    warn!("Telegram getUpdates network error: {:?}; retrying in 5s", e);
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let jitter_ms = (ruby_policy::UnifiedConfirmationManager::generate_secure_code_6_digits()
+                        .parse::<u32>()
+                        .unwrap_or(123) % 500) as u64;
+                    let sleep_dur = backoff + Duration::from_millis(jitter_ms);
+                    warn!(
+                        "Telegram getUpdates network error: {:?}; retrying in {:?}",
+                        e, sleep_dur
+                    );
+                    tokio::time::sleep(sleep_dur).await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
                 }
             }
+        }
+
+        // L4: Best-effort going offline announcement
+        let offline_paired_id = self.config.lock().ok().and_then(|c| c.paired_user_id);
+        if let Some(paired_id) = offline_paired_id {
+            let _ = self
+                .client
+                .send_message(paired_id, "Ruby going offline (shutting down).")
+                .await;
         }
 
         info!("Telegram long polling stopped cleanly.");

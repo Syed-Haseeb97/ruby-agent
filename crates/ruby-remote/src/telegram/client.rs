@@ -73,6 +73,17 @@ impl TelegramClient {
                 "Telegram getUpdates failed with status {}: [REDACTED_BODY]",
                 status
             );
+            if status == reqwest::StatusCode::CONFLICT {
+                return Err(RemoteError::Conflict409);
+            } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_secs = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("parameters")?.get("retry_after")?.as_u64())
+                    .unwrap_or(5);
+                return Err(RemoteError::RateLimited429(retry_secs));
+            } else if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(RemoteError::TokenRevoked);
+            }
             return Err(RemoteError::Api(format!("Status {}: {}", status, body)));
         }
 

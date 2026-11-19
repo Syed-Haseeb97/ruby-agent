@@ -9,6 +9,12 @@ pub enum RemoteError {
     Network(String),
     #[error("API error: {0}")]
     Api(String),
+    #[error("Telegram 409 Conflict: Another poller is active")]
+    Conflict409,
+    #[error("Telegram 429 Rate Limit: retry after {0} seconds")]
+    RateLimited429(u64),
+    #[error("Telegram 401 Unauthorized: Token revoked or invalid")]
+    TokenRevoked,
     #[error("Authentication error: {0}")]
     Auth(String),
     #[error("Message is stale: {0}")]

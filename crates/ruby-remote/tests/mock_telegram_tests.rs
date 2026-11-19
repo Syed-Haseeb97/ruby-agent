@@ -1355,7 +1355,7 @@ async fn test_telegram_screen_command_confirmation_flow_and_photo_dispatch() {
     assert!(prompt.contains("Confirm remote screen capture?"));
     assert!(prompt.contains("Telegram bot messages are not end-to-end encrypted"));
     assert!(prompt.contains("/yes"));
-    assert_eq!(code_str.len(), 4);
+    assert_eq!(code_str.len(), 6);
 
     // 2. User confirms with /yes <code>
     let confirm_update = serde_json::json!({
@@ -1817,6 +1817,141 @@ async fn test_channel_adapter_send_file_routes_images_to_send_photo() {
         .await
         .unwrap();
     assert_eq!(mock.sent_documents.lock().unwrap().len(), 1);
+}
+
+// 12. Remote /quit command flow requiring 6-digit confirmation
+#[tokio::test]
+async fn test_telegram_remote_quit_command_flow() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        paired_user_id: Some(12345),
+        ..Default::default()
+    }));
+
+    let confirmation_mgr = ConfirmationManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        confirmation_mgr.clone(),
+        AuditLogger::new(temp_dir.path().join("audit.log")),
+    );
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 1. Send /quit -> requires confirmation
+    let quit_update = serde_json::json!({
+        "update_id": 1,
+        "message": {
+            "message_id": 10,
+            "from": { "id": 12345 },
+            "chat": { "id": 12345, "type": "private" },
+            "date": now_secs,
+            "text": "/quit"
+        }
+    });
+    adapter.process_update(quit_update, now_secs).await.unwrap();
+
+    let sent = mock.sent_messages.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let prompt_text = sent[0]["text"].as_str().unwrap();
+    assert!(prompt_text.contains("Confirm remote Ruby application shutdown"));
+    assert!(prompt_text.contains("/yes"));
+    drop(sent);
+
+    // Extract confirmation code
+    let pending = confirmation_mgr
+        .unified()
+        .get_pending_action()
+        .expect("Pending action must exist");
+    assert_eq!(pending.code.len(), 6);
+
+    // 2. Confirm shutdown via /yes <code>
+    let yes_update = serde_json::json!({
+        "update_id": 2,
+        "message": {
+            "message_id": 11,
+            "from": { "id": 12345 },
+            "chat": { "id": 12345, "type": "private" },
+            "date": now_secs,
+            "text": format!("/yes {}", pending.code)
+        }
+    });
+    adapter.process_update(yes_update, now_secs).await.unwrap();
+
+    let sent2 = mock.sent_messages.lock().unwrap();
+    assert_eq!(sent2.len(), 2);
+    assert!(sent2[1]["text"].as_str().unwrap().contains("shutting down gracefully"));
+}
+
+// 13. Session lock awareness: pauses Mode A, notifies Telegram, Mode B continues
+#[tokio::test]
+async fn test_session_lock_pauses_mode_a_while_mode_b_continues() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        paired_user_id: Some(12345),
+        ..Default::default()
+    }));
+
+    let task_mgr = TaskManager::new();
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        task_mgr.clone(),
+        ConfirmationManager::new(),
+        AuditLogger::new(temp_dir.path().join("audit.log")),
+    );
+    adapter.set_computer_use_enabled(true);
+
+    // Create a running Mode A task
+    let task = task_mgr.create_task(12345, "Autonomous desktop automation");
+    task_mgr.update_task_state(&task.id, TaskState::Running, None, None);
+
+    // Simulate session lock event
+    adapter.on_session_lock_changed(true).await.unwrap();
+
+    // Mode A task should be transitioned to NeedsInput (paused)
+    let recent = task_mgr.get_recent_tasks(5);
+    let paused_task = recent.iter().find(|t| t.id == task.id).unwrap();
+    assert_eq!(paused_task.state, TaskState::NeedsInput);
+    assert!(paused_task.result.as_ref().unwrap().contains("Desktop session locked"));
+
+    // User should have received notification on paired device
+    let sent = mock.sent_messages.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0]["text"].as_str().unwrap().contains("Desktop session locked: Mode A autonomous task paused"));
+}
+
+// 14. Telegram error classification (409 Conflict, 429 RateLimit, 401 Revoked)
+#[test]
+fn test_telegram_error_classification_types() {
+    let err409 = ruby_remote::types::RemoteError::Conflict409;
+    assert_eq!(err409.to_string(), "Telegram 409 Conflict: Another poller is active");
+
+    let err429 = ruby_remote::types::RemoteError::RateLimited429(30);
+    assert_eq!(err429.to_string(), "Telegram 429 Rate Limit: retry after 30 seconds");
+
+    let err401 = ruby_remote::types::RemoteError::TokenRevoked;
+    assert_eq!(err401.to_string(), "Telegram 401 Unauthorized: Token revoked or invalid");
 }
 
 // 12. Opt-in live test: sends one message to paired chat and prints reply latency

@@ -561,11 +561,11 @@ mod tests {
             "Task must transition to NeedsInput pending user confirmation"
         );
 
-        // Extract 4-digit confirmation code from question/prompt
+        // Extract 6-digit confirmation code from question/prompt
         let code = reply
             .split_whitespace()
-            .find(|w| w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()))
-            .expect("Must have 4-digit confirmation code");
+            .find(|w| w.len() == 6 && w.chars().all(|c| c.is_ascii_digit()))
+            .expect("Must have 6-digit confirmation code");
 
         // 2. User confirms via code; action is verified
         let verified = confirmation_mgr.verify_code(code).unwrap();

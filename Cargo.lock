@@ -3448,8 +3448,12 @@ version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
  "image",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "uuid",
  "windows 0.58.0",
 ]
 

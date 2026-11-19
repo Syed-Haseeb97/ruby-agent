@@ -7,9 +7,16 @@ pub mod hook_types;
 pub mod hotkey_machine;
 pub mod job_object;
 pub mod keyboard_hook;
+pub mod lifecycle;
 pub mod text_injection;
 
 pub use job_object::JobObjectProcessTree;
+pub use lifecycle::{
+    AutostartManager, CrashReporter, KeepAwakeManager, LifecycleError, MockAutostartManager,
+    MockKeepAwakeManager, MockPowerStatusProvider, MockSessionLockWatcher, MockSingleInstanceGuard,
+    NamedSingleInstance, PowerSource, PowerStatus, PowerStatusProvider, SessionLockWatcher,
+    SingleInstanceGuard,
+};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

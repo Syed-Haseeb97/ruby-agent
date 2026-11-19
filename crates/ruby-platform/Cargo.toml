@@ -27,6 +27,12 @@ thiserror.workspace = true
 crossbeam-channel = "0.5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
