@@ -217,16 +217,22 @@ impl PolicyGatedCommandHandler {
             };
         }
 
-        // 8. GitHub PR Listing: "gh pr list [repo]" or "pr list [repo]"
+        // 8. GitHub PR Listing: "gh pr list [repo]" or "pr list [repo]" or natural query
         if let Some(args_str) = trimmed
             .strip_prefix("gh pr list")
             .or_else(|| trimmed.strip_prefix("pr list"))
+            .or_else(|| trimmed.strip_prefix("check open PRs"))
+            .or_else(|| trimmed.strip_prefix("check open prs"))
         {
-            let repo = args_str.trim();
-            let repo_opt = if repo.is_empty() {
+            let cleaned = args_str
+                .trim()
+                .trim_start_matches("on my repo")
+                .trim_start_matches("in my repo")
+                .trim();
+            let repo_opt = if cleaned.is_empty() {
                 None
             } else {
-                Some(repo.to_string())
+                Some(cleaned.to_string())
             };
             return PolicyDecision::Allowed(LocalAction::GhPrList {
                 repo: repo_opt,
