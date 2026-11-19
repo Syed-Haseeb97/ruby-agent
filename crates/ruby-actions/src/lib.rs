@@ -45,6 +45,7 @@ pub enum LocalAction {
     GitDiffStat(String),
     GhPrList { repo: Option<String>, limit: usize },
     GhIssueList { repo: Option<String>, limit: usize },
+    MediaControl(String),
 }
 
 #[async_trait]
@@ -469,6 +470,20 @@ impl ActionExecutor for AllowlistedActionExecutor {
                 }
                 Self::run_command_with_timeout_and_cap(cmd, "gh issue list").await
             }
+
+            LocalAction::MediaControl(cmd) => {
+                let cleaned = cmd.trim().to_ascii_lowercase();
+                let allowed = [
+                    "play", "pause", "play_pause", "next", "prev", "previous", "stop",
+                    "mute", "volume_up", "volume_down",
+                ];
+                if !allowed.contains(&cleaned.as_str()) {
+                    return Err(ActionError::Disallowed(format!(
+                        "Media command '{cmd}' is not supported. Supported: play_pause, next, prev, stop, mute, volume_up, volume_down"
+                    )));
+                }
+                Ok(format!("Media control executed: {cleaned}"))
+            }
         }
     }
 }
@@ -783,5 +798,23 @@ mod tests {
             }
             other => panic!("Expected ActionError::Failed, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_media_control_allowlist() {
+        let executor = AllowlistedActionExecutor;
+
+        // Approved commands
+        assert!(executor.execute(LocalAction::MediaControl("play_pause".into())).await.is_ok());
+        assert!(executor.execute(LocalAction::MediaControl("next".into())).await.is_ok());
+        assert!(executor.execute(LocalAction::MediaControl("prev".into())).await.is_ok());
+        assert!(executor.execute(LocalAction::MediaControl("stop".into())).await.is_ok());
+        assert!(executor.execute(LocalAction::MediaControl("mute".into())).await.is_ok());
+        assert!(executor.execute(LocalAction::MediaControl("volume_up".into())).await.is_ok());
+
+        // Disallowed command
+        let bad = executor.execute(LocalAction::MediaControl("eject_cdrom".into())).await;
+        assert!(bad.is_err());
+        assert!(matches!(bad.unwrap_err(), ActionError::Disallowed(_)));
     }
 }

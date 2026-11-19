@@ -122,6 +122,7 @@ fn test_fuzz_local_action_serde_robustness() {
         LocalAction::GitDiffStat("D:\\Safe\\repo".into()),
         LocalAction::GhPrList { repo: Some("owner/repo".into()), limit: 10 },
         LocalAction::GhIssueList { repo: None, limit: 10 },
+        LocalAction::MediaControl("play_pause".into()),
     ];
 
     for act in &valid_actions {
