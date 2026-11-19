@@ -1,21 +1,28 @@
-﻿cargo :     Finished `test` profile [unoptimized + debuginfo] target(s) in 2.59s
-At line:1 char:149
-+ ... ch {}; cd D:\projects\ruby-agent; cargo test --workspace *>&1 | Out-F ...
-+                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    + CategoryInfo          : NotSpecified: (    Finished `t...get(s) in 2.59s:String) [], RemoteException
+﻿cargo :    Compiling ruby-gemini v0.1.0 (D:\projects\ruby-agent\crates\ruby-gemini)
+At line:2 char:1
++ cargo test --workspace *>&1 | Out-File -Encoding utf8 docs/TEST_RUN_R ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling ru...es\ruby-gemini):String) [], RemoteException
     + FullyQualifiedErrorId : NativeCommandError
  
+   Compiling ruby-desktop v0.1.0 (D:\projects\ruby-agent\crates\ruby-desktop)
+   Compiling ruby-mcp v0.1.0 (D:\projects\ruby-agent\crates\ruby-mcp)
+   Compiling ruby-actions v0.1.0 (D:\projects\ruby-agent\crates\ruby-actions)
+   Compiling ruby-dictation v0.1.0 (D:\projects\ruby-agent\crates\ruby-dictation)
+   Compiling ruby-core v0.1.0 (D:\projects\ruby-agent\crates\ruby-core)
+   Compiling ruby-remote v0.1.0 (D:\projects\ruby-agent\crates\ruby-remote)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 36s
      Running unittests src\lib.rs 
 (target\debug\build\ruby-actions/2699a7af709a0c68\out\ruby_actions-2699a7af709a0c68.exe)
 
 running 43 tests
 test computer_use::action::tests::test_coordinate_mapping ... ok
 test computer_use::action::tests::test_dpi_scaling_100_percent ... ok
-test computer_use::action::tests::test_dpi_scaling_200_percent ... ok
+test computer_use::action::tests::test_dpi_scaling_150_percent ... ok
 test computer_use::action::tests::test_action_serialization_and_deserialization ... ok
+test computer_use::action::tests::test_dpi_scaling_200_percent ... ok
 test computer_use::action::tests::test_multi_monitor_negative_origin_secondary ... ok
 test computer_use::action::tests::test_dpi_scaling_125_percent ... ok
-test computer_use::action::tests::test_dpi_scaling_150_percent ... ok
 test computer_use::agent_loop::tests::test_elevated_foreground_or_secure_desktop_stops_agent_loop ... ok
 test computer_use::agent_loop::tests::test_password_field_detected_refuses_typing ... ok
 test computer_use::agent_loop::tests::test_secret_typing_refused ... ok
@@ -23,37 +30,37 @@ test computer_use::agent_loop::tests::test_session_locked_stops_agent_loop ... o
 test computer_use::agent_loop::tests::test_kill_switch_aborts_hanging_model_call ... ok
 test computer_use::agent_loop::tests::test_unverifiable_field_in_browser_refuses_typing ... ok
 test computer_use::agent_loop::tests::test_dry_run_mode_records_without_executing ... ok
-test computer_use::gemini_vision::tests::test_parse_action_json_clean_and_fenced ... ok
-test computer_use::gemini_vision::tests::test_third_party_fallback_blocked_without_explicit_confirmation ... ok
-test computer_use::gemini_vision::tests::test_third_party_fallback_refused_when_allow_fallback_is_false ... ok
 test computer_use::agent_loop::tests::test_kill_switch_during_held_key_releases_key ... ok
 test computer_use::agent_loop::tests::test_kill_switch_during_drag_releases_mouse ... ok
 test computer_use::agent_loop::tests::test_audit_log_hygiene_never_records_typed_text_or_screenshots ... ok
+test computer_use::gemini_vision::tests::test_parse_action_json_clean_and_fenced ... ok
 test screen_recorder::tests::test_ffmpeg_args_strictly_disable_audio ... ok
-test screen_recorder::tests::test_denylist_tick_sub_500ms_clock_deletes_current_segment_immediately ... ok
+test computer_use::gemini_vision::tests::test_third_party_fallback_refused_when_allow_fallback_is_false ... ok
+test computer_use::gemini_vision::tests::test_third_party_fallback_blocked_without_explicit_confirmation ... ok
 test screen_recorder::tests::test_screen_recorder_retention_and_delete_with_confirmation ... ok
 test tests::test_file_info_action ... ok
-test screen_recorder::tests::test_screen_recorder_with_fake_ffmpeg_binary_killed_on_stop ... ok
+test computer_use::agent_loop::tests::test_agent_loop_success_path ... ok
+test computer_use::agent_loop::tests::test_stuck_detector_aborts_loop ... ok
 test tests::test_launch_app_allowlist_enforcement ... ok
+test screen_recorder::tests::test_denylist_tick_sub_500ms_clock_deletes_current_segment_immediately ... ok
 test tests::test_list_folder_action ... ok
 test tests::test_media_control_allowlist ... ok
 test tests::test_open_file_allows_text_file ... ok
 test tests::test_open_file_blocks_executable_extensions ... ok
 test tests::test_open_file_fails_if_nonexistent ... ok
-test tests::test_read_file_head_text_and_binary_refusal ... ok
 test tests::test_screen_click_bounds ... ok
 test tests::test_send_file_revalidates_canonical_path_at_read_time ... ok
-test screen_recorder::tests::test_screen_recording_confirmation_flow_and_denylist_guard ... ok
+test tests::test_read_file_head_text_and_binary_refusal ... ok
 test tests::test_settings_allowlist_and_injection_prevention ... ok
 test tests::test_send_file_size_limit ... ok
-test computer_use::agent_loop::tests::test_agent_loop_success_path ... ok
-test computer_use::agent_loop::tests::test_stuck_detector_aborts_loop ... ok
+test screen_recorder::tests::test_screen_recording_confirmation_flow_and_denylist_guard ... ok
+test screen_recorder::tests::test_screen_recorder_with_fake_ffmpeg_binary_killed_on_stop ... ok
 test computer_use::agent_loop::tests::test_wall_clock_timeout_exceeded ... ok
 test computer_use::agent_loop::tests::test_max_steps_limit_exceeded ... ok
-test tests::test_git_fsmonitor_override_prevents_script_execution ... ok
 test tests::test_git_helper_timeout_kills_process_tree ... ok
+test tests::test_git_fsmonitor_override_prevents_script_execution ... ok
 
-test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
 
      Running tests\fuzz_action_grammar.rs 
 (target\debug\build\ruby-actions/697e1b2b5b378cd8\out\fuzz_action_grammar-697e1b2b5b378cd8.exe)
@@ -62,7 +69,7 @@ running 2 tests
 test test_fuzz_local_action_serde_robustness ... ok
 test test_fuzz_computer_action_parser_robustness ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
      Running unittests src\lib.rs 
 (target\debug\build\ruby-config/7dfacb93a1d71d1a\out\ruby_config-7dfacb93a1d71d1a.exe)
@@ -75,9 +82,9 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
      Running unittests src\lib.rs (target\debug\build\ruby-core/78f0d820d2918986\out\ruby_core-78f0d820d2918986.exe)
 
-running 69 tests
-test chat::tests::test_emotion_aliases_are_normalized ... ok
+running 70 tests
 test chat::tests::test_chat_session_accumulates_turns ... ok
+test chat::tests::test_emotion_aliases_are_normalized ... ok
 test chat::tests::test_invalid_emotion_falls_back_to_neutral_without_losing_answer ... ok
 test chat::tests::test_json_inside_markdown_fence_is_supported ... ok
 test chat::tests::test_malformed_json_is_kept_as_plain_text ... ok
@@ -86,23 +93,24 @@ test chat::tests::test_parses_response_and_supported_emotion ... ok
 test chat::tests::test_plain_text_reply_remains_compatible ... ok
 test chat::tests::test_preamble_around_json_is_supported ... ok
 test chat::tests::test_emotion_label_never_spoken_or_typed ... ok
+test chat::tests::test_bad_day_maps_to_empathetic_even_if_model_says_sad ... ok
 test chat::tests::test_non_distress_keeps_model_emotion ... ok
 test chat::tests::test_unrelated_negative_word_does_not_force_empathy ... ok
-test chat::tests::test_bad_day_maps_to_empathetic_even_if_model_says_sad ... ok
 test chat::tests::test_supportive_disclosures_map_to_empathetic ... ok
 test chat::export_bindings_chatrole ... ok
-test doctor::tests::test_doctor_diagnostics_report_generation ... ok
+test export_bindings_emotion ... ok
 test logging::tests::test_daily_rotating_log_file_and_retention_pruning ... ok
 test logging::tests::test_property_fuzzing_all_secret_classes_never_leak_to_disk ... ok
-test export_bindings_emotion ... ok
+test export_bindings_operationalstate ... ok
 test logging::tests::test_randomized_property_redaction_fuzzing ... ok
+test logging::tests::test_proptest_secret_redaction_1000_cases_with_zero_width_spaces_and_unicode_whitespace ... ok
 test metrics::tests::test_metrics_collector_record_and_snapshot ... ok
 test logging::tests::test_redaction_patterns_replace_all_s10_secrets ... ok
 test tasks::tests::test_background_commands_handling ... ok
 test tasks::tests::test_background_supervisor_concurrency_limit ... ok
 test tasks::tests::test_background_supervisor_restart_recovery ... ok
 test tasks::tests::test_background_task_supervisor_lifecycle_and_cancellation ... ok
-test tasks::tests::test_advanced_shell_per_command_confirmation ... ok
+test tasks::tests::test_background_task_supervisor_timeout ... ok
 test tasks::tests::test_local_tool_backend_advanced_shell_disabled_by_default ... ok
 test tasks::tests::test_local_tool_backend_gui_isolation_required ... ok
 test tasks::tests::test_local_tool_backend_path_traversal_blocked ... ok
@@ -111,82 +119,93 @@ test tasks::tests::test_m5_1_argv_only_rejection ... ok
 test tasks::tests::test_m5_1_cwd_outside_roots ... ok
 test tasks::tests::test_m5_1_denylist_rejection ... ok
 test tasks::tests::test_m5_1_elevated_refusal ... ok
-test export_bindings_operationalstate ... ok
-test tasks::tests::test_sqlite_job_store_lifecycle ... ok
+test export_bindings_taskstatus ... ok
+test export_bindings_backgroundtask ... ok
+test chat::export_bindings_chatmessage ... ok
+test chat::export_bindings_chatsession ... ok
+test export_bindings_orbvisualstate ... ok
 test tests::test_emotional_expressions_do_not_use_black_core ... ok
 test tests::test_neutral_listening_and_speaking_keep_approved_core ... ok
 test tests::test_sad_mood_has_no_black_core ... ok
-test tasks::tests::test_background_task_supervisor_timeout ... ok
-test export_bindings_taskstatus ... ok
-test export_bindings_backgroundtask ... ok
-test tts::tests::test_fallback_chain_falls_back_when_primary_fails ... ok
 test tts::tests::test_fallback_chain_cancels_immediately ... ok
-test tts::tests::test_fallback_chain_primary_success ... ok
+test tts::tests::test_fallback_chain_falls_back_when_primary_fails ... ok
+test tasks::tests::test_sqlite_job_store_lifecycle ... ok
 test tts::tests::test_mock_tts_engine_returns_audio ... ok
+test tts::tests::test_fallback_chain_primary_success ... ok
 test voice_live::tests::test_esc_key_deconfliction_hierarchy_mode_a_then_voice_then_dictation ... ok
-test tts::export_bindings_ttsenginekind ... ok
 test voice_live::tests::test_mock_level_orb_emits_thinking_during_tool_dispatch ... ok
 test voice_live::tests::test_mock_level_policy_gated_live_tool_dispatcher_data_output_and_confirmation ... ok
 test voice_live::tests::test_mock_level_prompt_injection_in_transcript_treated_strictly_as_data ... ok
 test voice_live::tests::test_mock_level_push_mic_audio_fails_when_not_started ... ok
 test voice_live::tests::test_mock_level_voice_live_audio_response_played ... ok
 test voice_live::tests::test_mock_level_voice_live_interrupted_calls_audio_output_interrupt ... ok
-test tasks::tests::test_m5_1_output_cap ... ok
+test tts::export_bindings_ttsvoice ... ok
 test voice_live::tests::test_mock_level_voice_live_start_transitions_to_active ... ok
 test voice_live::tests::test_mock_level_voice_live_starts_as_idle ... ok
-test tts::export_bindings_ttsvoice ... ok
-test chat::export_bindings_chatmessage ... ok
-test export_bindings_orbvisualstate ... ok
-test chat::export_bindings_chatsession ... ok
+test voice_live::tests::test_mock_level_voice_live_rejects_double_start ... ok
 test voice_live::tests::test_mock_level_voice_live_tool_dispatch_called ... ok
 test voice_live::tests::test_mock_level_voice_live_stop_transitions_to_idle ... ok
 test voice_live::tests::test_mock_level_voice_live_transcript_recorded ... ok
-test voice_live::tests::test_mock_level_voice_live_rejects_double_start ... ok
 test voice_live::tests::test_voice_live_stopped_via_telegram_and_hotkey ... ok
 test tts::tests::test_playback_controller_cancel ... ok
+test tts::export_bindings_ttsenginekind ... ok
 test voice_live::tests::test_mock_level_hard_session_limit_terminates_session ... ok
+test tasks::tests::test_advanced_shell_per_command_confirmation ... ok
+test doctor::tests::test_doctor_diagnostics_report_generation ... ok
+test tasks::tests::test_m5_1_output_cap ... ok
 
-test result: ok. 69 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.71s
+
+     Running tests\fuzz_parsers_matrix.rs 
+(target\debug\build\ruby-core/929c2cda8c82c2d5\out\fuzz_parsers_matrix-929c2cda8c82c2d5.exe)
+
+running 3 tests
+test test_fuzz_mcp_json_rpc_line_parser_never_panics ... ok
+test test_fuzz_gemini_vision_action_parser_never_panics ... ok
+test test_fuzz_gemini_and_emotion_parsers_never_panic ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
 
      Running tests\prompt_injection_matrix.rs 
 (target\debug\build\ruby-core/902f1db76cdf3970\out\prompt_injection_matrix-902f1db76cdf3970.exe)
 
 running 10 tests
 test test_case_2_indirect_injection_via_clipboard_and_ocr ... ok
-test test_case_10_dual_channel_forged_confirmation_injection ... ok
 test test_case_5_indirect_injection_via_mcp_response ... ok
 test test_case_6_jailbreak_dan_mode_override ... ok
 test test_case_4_indirect_injection_via_web_fetch ... ok
+test test_case_10_dual_channel_forged_confirmation_injection ... ok
 test test_case_9_passive_data_framing_guarantee ... ok
 test test_case_7_unicode_homoglyph_obfuscation ... ok
 test test_case_3_indirect_injection_via_file_content_read ... ok
 test test_case_1_indirect_injection_via_memory_retrieval ... ok
 test test_case_8_base64_encoded_payload_injection ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
      Running unittests src\lib.rs 
 (target\debug\build\ruby-desktop/8799e5e8a933f8ff\out\ruby_desktop-8799e5e8a933f8ff.exe)
 
-running 16 tests
+running 17 tests
 test commands::tests::test_chat_served_via_freellmapi_emits_console_notice ... ok
-test commands::voice_live_tests::test_get_secrets_status_never_contains_values ... ok
 test commands::tests::test_model_tool_call_extraction ... ok
-test commands::voice_live_tests::test_get_voice_live_status_idle_string ... ok
+test commands::voice_live_tests::test_get_secrets_status_never_contains_values ... ok
 test commands::voice_live_tests::test_esc_hierarchy_dispatch_mode_a_then_voice_then_dictation ... ok
+test commands::voice_live_tests::test_get_voice_live_status_idle_string ... ok
 test commands::voice_live_tests::test_push_mic_audio_before_start_errors ... ok
 test commands::tests::test_model_tool_call_policy_gating_and_data_return ... ok
 test commands::voice_live_tests::test_esc_hierarchy_all_matrix_rows_tap_and_hold ... ok
-test commands::voice_live_tests::test_save_app_config_succeeds_with_safe_defaults ... ok
 test commands::voice_live_tests::test_save_app_config_requires_confirmation_for_dangerous_flags ... ok
-test commands::voice_live_tests::test_save_app_config_warns_on_whole_drive_root ... ok
+test commands::voice_live_tests::test_save_app_config_succeeds_with_safe_defaults ... ok
 test commands::voice_live_tests::test_console_ipc_delete_memory_requires_confirmation_then_deletes ... ok
 test commands::voice_live_tests::test_console_ipc_wipe_all_memories_shows_count_requires_confirmation_then_wipes ... ok
+test commands::voice_live_tests::test_console_ipc_delete_recordings_requires_confirmation_then_deletes ... ok
+test commands::voice_live_tests::test_save_app_config_warns_on_whole_drive_root ... ok
 test commands::voice_live_tests::test_observability_redacted_logger_and_metrics_ipc ... ok
 test commands::voice_live_tests::test_voice_live_command_start_and_stop ... ok
 test commands::voice_live_tests::test_voice_live_double_start_rejected ... ok
 
-test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
 
      Running unittests src\main.rs 
 (target\debug\build\ruby-desktop/ab4b851e3905204e\out\ruby_desktop-ab4b851e3905204e.exe)
@@ -200,18 +219,18 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 11 tests
 test tests::test_engine_level_hotkey_to_engine_preroll_and_early_release ... ok
-test tests::test_mock_level_dictation_cancellation ... ok
 test tests::test_hands_free_safety_rules ... ok
-test tests::test_mock_level_pre_roll_discard_on_early_release ... ok
-test tests::test_mock_level_dictation_network_failure_and_retry ... ok
-test tests::test_dictation_cues_emitted ... ok
+test tests::test_mock_level_dictation_cancellation ... ok
 test tests::test_orb_state_mapping ... ok
-test tests::test_mock_level_full_dictation_pipeline_with_mocks ... ok
+test tests::test_mock_level_pre_roll_discard_on_early_release ... ok
 test tests::test_mock_level_pre_roll_preserves_speech_starting_at_100ms_before_250ms_commit ... ok
+test tests::test_dictation_cues_emitted ... ok
+test tests::test_mock_level_full_dictation_pipeline_with_mocks ... ok
+test tests::test_mock_level_dictation_network_failure_and_retry ... ok
 test export_bindings_dictationlatencybudget ... ok
 test export_bindings_dictationstate ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
 
      Running unittests src\lib.rs 
 (target\debug\build\ruby-gemini/ae5224017aa70bca\out\ruby_gemini-ae5224017aa70bca.exe)
@@ -221,18 +240,18 @@ test dictation_client::tests::test_adversarial_prompt_resists_instruction_overri
 test chat_client::tests::test_timeout_scaling_chat ... ok
 test chat_client::tests::test_mock_chat_client_responds_with_emotion ... ok
 test dictation_client::tests::test_freellmapi_audio_path_success ... ok
-test dictation_client::tests::test_freellmapi_path2_triggers_on_415_and_422 ... ok
 test dictation_client::tests::test_freellmapi_audio_rejected_fallback_to_transcription ... ok
-test dictation_client::tests::test_freellmapi_429_does_not_trigger_path2 ... ok
-test dictation_client::tests::test_google_config_error_403_never_falls_back ... ok
+test dictation_client::tests::test_freellmapi_path2_triggers_on_415_and_422 ... ok
 test dictation_client::tests::test_key_hygiene_and_log_redaction ... ok
+test dictation_client::tests::test_google_config_error_403_never_falls_back ... ok
+test dictation_client::tests::test_freellmapi_429_does_not_trigger_path2 ... ok
 test dictation_client::tests::test_google_per_minute_429_does_not_trigger_daily_lockout ... ok
 test dictation_client::tests::test_absent_or_unparseable_quota_details_treated_as_short_cooldown ... ok
 test dictation_client::tests::test_quota_id_field_triggers_daily_exhaustion ... ok
 test dictation_client::tests::test_timeout_scaling_formula ... ok
 test live_session::tests::test_live_session_config_default_model ... ok
-test dictation_client::tests::test_google_daily_quota_429_skips_google_and_routes_to_freellmapi ... ok
 test dictation_client::tests::test_primary_503_fallback_caching_and_timeout_bound ... ok
+test dictation_client::tests::test_google_daily_quota_429_skips_google_and_routes_to_freellmapi ... ok
 test live_session::tests::test_mock_level_live_session_emits_setup_complete ... ok
 test live_session::tests::test_mock_level_live_session_responds_to_audio_chunk ... ok
 test dictation_client::tests::test_secret_filters_comprehensive_classes ... ok
@@ -254,34 +273,34 @@ test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
      Running unittests src\lib.rs (target\debug\build\ruby-mcp/a7d16084cd98bfee\out\ruby_mcp-a7d16084cd98bfee.exe)
 
 running 11 tests
-test tests::test_prompt_injection_in_mcp_output_treated_strictly_as_passive_data ... ok
 test tests::test_mcp_output_capped_at_64kb ... ok
+test tests::test_prompt_injection_in_mcp_output_treated_strictly_as_passive_data ... ok
 test tests::test_playwright_pinned_version_and_isolated_profile ... ok
-test tests::test_idle_shutdown_with_controllable_clock ... ok
 test tests::test_unknown_tool_denied_by_default ... ok
+test tests::test_idle_shutdown_with_controllable_clock ... ok
 test tests::test_write_and_destructive_tools_require_confirmation ... ok
-test tests::test_no_live_pending_confirmation_code_ever_leaks_to_model_visible_outputs ... ok
 test tests::test_registry_load_and_save_mcp_servers ... ok
+test tests::test_no_live_pending_confirmation_code_ever_leaks_to_model_visible_outputs ... ok
 test tests::test_model_driven_memory_delete_and_wipe_require_confirmation ... ok
 test tests::test_server_crash_isolation_returns_process_error_without_crashing ... ok
 test tests::test_mcp_1mb_bounded_read_kills_child_on_oversize_line ... ok
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.42s
 
      Running unittests src\lib.rs 
 (target\debug\build\ruby-memory/f41d9f0029b0fe78\out\ruby_memory-f41d9f0029b0fe78.exe)
 
 running 11 tests
-test tests::test_memory_output_is_strictly_passive_data ... ok
 test tests::test_keyring_secret_with_env_fallback ... ok
-test tests::test_refuse_raw_audio_payload ... ok
+test tests::test_memory_output_is_strictly_passive_data ... ok
 test tests::test_refuse_openai_api_key ... ok
+test tests::test_refuse_aws_access_key ... ok
+test tests::test_refuse_raw_audio_payload ... ok
+test tests::test_refuse_private_key_header ... ok
 test tests::test_refuse_github_pat ... ok
 test tests::test_refuse_hardcoded_assignment ... ok
-test tests::test_refuse_aws_access_key ... ok
-test tests::test_refuse_private_key_header ... ok
-test tests::test_crud_store_search_delete_wipe ... ok
 test tests::test_refuse_gemini_api_key ... ok
+test tests::test_crud_store_search_delete_wipe ... ok
 test tests::test_refuse_telegram_bot_token ... ok
 
 test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
@@ -290,14 +309,14 @@ test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 (target\debug\build\ruby-platform/73f8417e2672ad24\out\ruby_platform-73f8417e2672ad24.exe)
 
 running 18 tests
-test hotkey_machine::tests::test_chord_ctrl_win_triggers_suppression ... ok
-test hotkey_machine::tests::test_plain_win_press_and_release_never_injects_suppression ... ok
-test hotkey_machine::tests::test_pre_roll_started_and_committed ... ok
-test hotkey_machine::tests::test_out_of_order_modifier_release ... ok
 test hotkey_machine::tests::test_double_tap_hands_free_workflow ... ok
-test hotkey_machine::tests::test_pre_roll_discarded_on_early_release ... ok
+test hotkey_machine::tests::test_chord_ctrl_win_triggers_suppression ... ok
 test hotkey_machine::tests::test_emergency_kill_switch ... ok
 test hotkey_machine::tests::test_escape_cancels_hold_and_hands_free ... ok
+test hotkey_machine::tests::test_out_of_order_modifier_release ... ok
+test hotkey_machine::tests::test_pre_roll_discarded_on_early_release ... ok
+test hotkey_machine::tests::test_pre_roll_started_and_committed ... ok
+test hotkey_machine::tests::test_plain_win_press_and_release_never_injects_suppression ... ok
 test hotkey_machine::tests::test_third_key_aborts_hold ... ok
 test lifecycle::tests::test_autostart_mock_enable_and_disable ... ok
 test lifecycle::tests::test_power_status_query_and_keep_awake ... ok
@@ -315,24 +334,24 @@ test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 (target\debug\build\ruby-policy/1fa1f541126e7b95\out\ruby_policy-1fa1f541126e7b95.exe)
 
 running 24 tests
-test computer_policy::tests::test_denylist_preserves_built_in_defaults ... ok
-test computer_policy::tests::test_denylist_catches_password_managers_and_banking ... ok
-test computer_policy::tests::test_denylist_matches_process_name_case_insensitive ... ok
 test computer_policy::tests::test_consequential_action_detection ... ok
-test computer_policy::tests::test_prompt_injection_passive_data_framing ... ok
-test computer_policy::tests::test_denylist_custom_user_entries_matched ... ok
 test computer_policy::tests::test_denylist_matches_window_title_case_insensitive ... ok
+test computer_policy::tests::test_denylist_custom_user_entries_matched ... ok
+test computer_policy::tests::test_denylist_catches_password_managers_and_banking ... ok
+test computer_policy::tests::test_denylist_preserves_built_in_defaults ... ok
+test computer_policy::tests::test_prompt_injection_passive_data_framing ... ok
+test computer_policy::tests::test_denylist_matches_process_name_case_insensitive ... ok
 test tests::test_blocked_alternate_data_stream_and_dos_devices ... ok
 test tests::test_allowed_path_inside_root_succeeds ... ok
-test tests::test_blocked_gemini_credentials ... ok
-test tests::test_blocked_env_file ... ok
 test tests::test_blocked_unc_path ... ok
-test tests::test_comprehensive_ssrf_rejection_classes ... ok
-test tests::test_blocked_ssh_directory ... ok
+test tests::test_blocked_env_file ... ok
 test tests::test_blocked_credential_vault ... ok
+test tests::test_comprehensive_ssrf_rejection_classes ... ok
+test tests::test_blocked_gemini_credentials ... ok
+test tests::test_blocked_ssh_directory ... ok
 test tests::test_blocked_appdata_secrets ... ok
-test tests::test_blocked_browser_profiles ... ok
 test tests::test_default_empty_roots_denies_everything ... ok
+test tests::test_blocked_browser_profiles ... ok
 test tests::test_path_traversal_double_dot_blocked ... ok
 test tests::test_symlink_or_junction_resolved_and_enforced ... ok
 test computer_policy::tests::test_secret_typing_refusal ... ok
@@ -340,24 +359,24 @@ test tests::test_unified_confirmation_manager_lifecycle_ttl_and_attempt_capping 
 test tests::test_ssrf_filtering ... ok
 test tests::test_tool_security_policy_classification_and_default_deny ... ok
 
-test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
 
      Running tests\fuzz_property_tests.rs 
 (target\debug\build\ruby-policy/05afec5789e0a592\out\fuzz_property_tests-05afec5789e0a592.exe)
 
 running 2 tests
-test test_fuzz_url_validation_and_ssrf_rejections ... ok
 test test_fuzz_path_canonicalization_and_traversal_never_escapes_or_panics ... ok
+test test_fuzz_url_validation_and_ssrf_rejections ... ok
 
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
 
      Running unittests src\lib.rs 
 (target\debug\build\ruby-remote/9c5bd3f731b558af\out\ruby_remote-9c5bd3f731b558af.exe)
 
 running 10 tests
 test key_storage::tests::test_remote_config_default_allowed_roots_empty ... ok
-test r1_router::tests::test_policy_gated_escalates_to_confirmation ... ok
 test r1_router::tests::test_policy_gated_allowed_settings ... ok
+test r1_router::tests::test_policy_gated_escalates_to_confirmation ... ok
 test key_storage::tests::test_remote_config_serialization_with_allowed_roots ... ok
 test r1_router::tests::test_policy_gated_denies_sensitive_directory ... ok
 test r1_router::tests::test_state_machine_transitions ... ok
@@ -368,13 +387,27 @@ test antigravity::tests::test_inspect_brain_directory_list_and_detail ... ok
 
 test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
+     Running tests\e2e_scenarios.rs 
+(target\debug\build\ruby-remote/98c77ec37d9ceb82\out\e2e_scenarios-98c77ec37d9ceb82.exe)
+
+running 6 tests
+test test_e2e_scenario_e3_mode_a_denylist_resume ... ok
+test test_e2e_scenario_e6_injection_corpus ... ok
+test test_e2e_scenario_e4_remote_security_lifecycle ... ok
+test test_e2e_scenario_e1_pr_query ... ok
+test test_e2e_scenario_e5_session_lock_mode_split ... ok
+test test_e2e_scenario_e2_phone_confirm_job ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
      Running tests\fuzz_telegram_grammar.rs 
 (target\debug\build\ruby-remote/1a83324d85945281\out\fuzz_telegram_grammar-1a83324d85945281.exe)
 
-running 1 test
+running 2 tests
+test test_fuzz_telegram_update_json_parser_robustness ... ok
 test test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
 
      Running tests\mock_telegram_tests.rs 
 (target\debug\build\ruby-remote/46cf7161dc789a11\out\mock_telegram_tests-46cf7161dc789a11.exe)
@@ -389,16 +422,16 @@ test test_bot_token_redaction ... ok
 test test_session_lock_pauses_mode_a_while_mode_b_continues ... ok
 test test_m4_consequential_confirmation_uses_unified_confirmation_manager ... ok
 test test_channel_adapter_send_file_routes_images_to_send_photo ... ok
-test test_confirmation_plumbing ... ok
 test test_stale_message_dropped ... ok
-test test_telegram_error_classification_types ... ok
+test test_confirmation_plumbing ... ok
 test test_stop_cancels_all_active_tasks ... ok
-test test_telegram_do_command_and_consequential_confirmation ... ok
+test test_telegram_error_classification_types ... ok
 test test_telegram_do_refuses_when_computer_use_disabled ... ok
+test test_telegram_do_command_and_consequential_confirmation ... ok
 test test_pairing_failed_attempts_capped_at_five ... ok
 test test_telegram_remote_quit_command_flow ... ok
-test test_telegram_screen_command_refuses_when_disabled ... ok
 test test_telegram_screen_command_confirmation_flow_and_photo_dispatch ... ok
+test test_telegram_screen_command_refuses_when_disabled ... ok
 test test_telegram_screen_command_elevated_or_secure_desktop_refusal ... ok
 test test_telegram_screen_command_uninitialized ... ok
 test test_telegram_screen_command_session_locked_refusal ... ok
@@ -415,14 +448,14 @@ test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
      Running unittests src\lib.rs (target\debug\build\ruby-voice/6869a5fbd757ed9a\out\ruby_voice-6869a5fbd757ed9a.exe)
 
 running 8 tests
-test wav::tests::test_encode_wav_valid_riff_header ... ok
 test wake_word::tests::test_disabled_wake_word_detector_is_off_by_default ... ok
 test wake_word::tests::test_mock_wake_word_detector_trigger_and_reset ... ok
+test wav::tests::test_encode_wav_valid_riff_header ... ok
 test vad::tests::test_pure_silence_returns_empty ... ok
 test capture::tests::test_mock_level_pre_roll_discard_on_early_release ... ok
+test capture::tests::test_mock_level_pre_roll_timeline_preserves_speech_starting_at_100ms_before_250ms_commit ... ok
 test capture::tests::test_mock_level_old_behavior_without_preroll_fails_to_capture_early_speech ... ok
 test vad::tests::test_trim_silence_vad_preserves_speech_with_padding ... ok
-test capture::tests::test_mock_level_pre_roll_timeline_preserves_speech_starting_at_100ms_before_250ms_commit ... ok
 
 test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 

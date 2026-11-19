@@ -348,10 +348,8 @@ mod tests {
             let clean = logger.sanitize(&raw);
 
             // Assert raw secret strings never leak
-            assert!(!clean.contains("ghp_AAAAAAAAAAAAAAAAAAAA"), "Case {} leaked GitHub token!", i);
-            assert!(!clean.contains("AIzaBBBBBBBBBBBBBBBBBBBB"), "Case {} leaked Gemini API key!", i);
-            assert!(!clean.contains("sk-CCCCCCCCCCCCCCCCCCCC"), "Case {} leaked sk- token!", i);
-            assert!(!clean.contains("freellmapi-DDDDDDDDDDDD"), "Case {} leaked FreeLLMAPI key!", i);
+            let raw_prefix = &raw_token[..15];
+            assert!(!clean.contains(raw_prefix), "Case {} leaked token prefix! Raw: {}, Clean: {}", i, raw_token, clean);
 
             // Assert redaction marker is present
             assert!(clean.contains("[REDACTED]"), "Case {} missing [REDACTED] marker! Got: {}", i, clean);
