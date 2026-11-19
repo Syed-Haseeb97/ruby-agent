@@ -674,10 +674,18 @@ impl DictationClient for MockDictationClient {
 
 /// Strips API keys, raw audio byte streams, and transcripts from error messages and log output.
 pub fn redact_sensitive_content(input: &str, known_key: Option<&str>) -> String {
-    let mut out = input.to_string();
+    let filtered: String = input
+        .chars()
+        .filter(|c| !matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+        .collect();
+    let mut out = filtered;
     if let Some(key) = known_key {
-        if !key.is_empty() {
-            out = out.replace(key, "[REDACTED_API_KEY]");
+        let clean_key: String = key
+            .chars()
+            .filter(|c| !matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+            .collect();
+        if !clean_key.is_empty() {
+            out = out.replace(&clean_key, "[REDACTED_API_KEY]");
         }
     }
     // Redact standard Google API key patterns (AIzaSy...)

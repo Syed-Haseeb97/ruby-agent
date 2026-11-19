@@ -69,7 +69,12 @@ impl RedactedJsonLogger {
 
     /// Redacts all sensitive credentials, keys, and tagged secrets from raw text.
     pub fn sanitize(&self, text: &str) -> String {
-        let mut sanitized = text.to_string();
+        // Strip zero-width evasion characters before applying redaction patterns
+        let filtered: String = text
+            .chars()
+            .filter(|c| !matches!(*c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'))
+            .collect();
+        let mut sanitized = filtered;
         for pattern in self.patterns.iter() {
             sanitized = pattern.replace_all(&sanitized, "[REDACTED]").to_string();
         }
@@ -294,5 +299,62 @@ mod tests {
         assert!(!disk_content.contains("AKIA"));
         assert!(!disk_content.contains("[SECRET]"));
         assert!(disk_content.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_proptest_secret_redaction_1000_cases_with_zero_width_spaces_and_unicode_whitespace() {
+        let temp = tempdir().unwrap();
+        let logger = RedactedJsonLogger::new(temp.path().to_path_buf());
+
+        struct SimpleRng(u64);
+        impl SimpleRng {
+            fn next_u32(&mut self) -> u32 {
+                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (self.0 >> 32) as u32
+            }
+            fn next_range(&mut self, min: u32, max: u32) -> u32 {
+                if min >= max { min } else { min + (self.next_u32() % (max - min)) }
+            }
+        }
+
+        let mut rng = SimpleRng(0xCAFE_BABE_1337_7777);
+        let zero_width_chars = ['\u{200B}', '\u{200C}', '\u{FEFF}', '\u{200D}'];
+        let unicode_spaces = ["\u{00A0}", "\u{2000}", "\u{2003}", "\u{2009}", "\u{3000}"];
+
+        for i in 0..1000 {
+            let secret_type = rng.next_range(0, 4);
+            let raw_token = match secret_type {
+                0 => format!("{}{}", "ghp_", "A".repeat(25)),
+                1 => format!("{}{}", "AIza", "B".repeat(35)),
+                2 => format!("{}{}", "sk-", "C".repeat(24)),
+                _ => format!("{}{}", "freellmapi-", "D".repeat(20)),
+            };
+
+            // Inject zero-width evasion characters into the token
+            let mut split_token = String::new();
+            for c in raw_token.chars() {
+                split_token.push(c);
+                if rng.next_range(0, 3) == 0 {
+                    let zw = zero_width_chars[rng.next_range(0, zero_width_chars.len() as u32) as usize];
+                    split_token.push(zw);
+                }
+            }
+
+            let u_space = unicode_spaces[rng.next_range(0, unicode_spaces.len() as u32) as usize];
+            let prefix = format!("context_before_{}{}", i, u_space);
+            let suffix = format!("{}context_after_{}", u_space, i);
+            let raw = format!("{}{}{}", prefix, split_token, suffix);
+
+            let clean = logger.sanitize(&raw);
+
+            // Assert raw secret strings never leak
+            assert!(!clean.contains("ghp_AAAAAAAAAAAAAAAAAAAA"), "Case {} leaked GitHub token!", i);
+            assert!(!clean.contains("AIzaBBBBBBBBBBBBBBBBBBBB"), "Case {} leaked Gemini API key!", i);
+            assert!(!clean.contains("sk-CCCCCCCCCCCCCCCCCCCC"), "Case {} leaked sk- token!", i);
+            assert!(!clean.contains("freellmapi-DDDDDDDDDDDD"), "Case {} leaked FreeLLMAPI key!", i);
+
+            // Assert redaction marker is present
+            assert!(clean.contains("[REDACTED]"), "Case {} missing [REDACTED] marker! Got: {}", i, clean);
+        }
     }
 }

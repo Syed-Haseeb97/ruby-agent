@@ -125,3 +125,50 @@ fn test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes() {
         let _ = handler.evaluate_instruction(&instruction);
     }
 }
+
+#[tokio::test]
+async fn test_fuzz_telegram_update_json_parser_robustness() {
+    let mut rng = SimpleRng::new(0x5555_AAAA_3333_7777);
+
+    // 1. Pathological Telegram JSON structures
+    let raw_payloads = [
+        "",
+        "{}",
+        "[]",
+        "{\"update_id\": null}",
+        "{\"update_id\": 12345, \"message\": null}",
+        "{\"update_id\": 12345, \"message\": {}}",
+        "{\"update_id\": 12345, \"message\": {\"chat\": null}}",
+        "{\"update_id\": 12345, \"message\": {\"chat\": {\"type\": \"group\"}}}",
+        "{\"update_id\": 12345, \"message\": {\"chat\": {\"type\": \"private\"}, \"from\": {\"id\": 99999}, \"text\": \"/status\"}}",
+        "{\"update_id\": 12345, \"message\": {\"chat\": {\"type\": \"private\"}, \"text\": null}}",
+        "{\"update_id\": -1, \"message\": {\"chat\": {\"type\": \"private\"}, \"text\": \"/stop\"}}",
+        "{\"update_id\": 999999999999999999999999999999999999999999999}",
+        "{\"update_id\": 1, \"message\": {\"chat\": {\"type\": \"private\"}, \"text\": \"\\u0000\\ufffd\"}}",
+    ];
+
+    let adapter = ruby_remote::telegram::TelegramAdapter::with_base_url(
+        "123456789:testtoken".to_string(),
+        Some("http://127.0.0.1:9".to_string()),
+    );
+
+    for payload in &raw_payloads {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+            let _ = adapter.process_update(val, 1000).await;
+        }
+    }
+
+    // 2. 5,000 pseudo-random string fuzz iterations
+    let alphabet = b"{}[]():,\"'\\/ \t\r\n\x00\xff0123456789abcdefABCDEF";
+    for _ in 0..5000 {
+        let len = rng.next_bounded(100) as usize;
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            bytes.push(alphabet[rng.next_bounded(alphabet.len() as u32) as usize]);
+        }
+        let s = String::from_utf8_lossy(&bytes);
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
+            let _ = adapter.process_update(val, 1000).await;
+        }
+    }
+}

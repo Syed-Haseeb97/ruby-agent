@@ -54,6 +54,16 @@ jobs:
       - name: Run Negative Secret Scanner Verification
         run: python acceptance/test_secret_scanner_negative.py
 
+      - name: Security Audit (cargo-audit)
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: Supply-Chain & License Linter (cargo-deny)
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
       - name: Verify Code Formatting
         run: cargo fmt --check
 

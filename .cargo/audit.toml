@@ -1,0 +1,18 @@
+# cargo-audit configuration for Ruby Agent
+# See https://docs.rs/cargo-audit/latest/cargo_audit/config/struct.AuditConfig.html
+
+[advisories]
+ignore = []
+informational_warnings = ["unmaintained", "notice"]
+severity_threshold = "low"
+
+[database]
+path = "~/.cargo/advisory-db"
+url = "https://github.com/RustSec/advisory-db.git"
+fetch = false
+stale = false
+
+[output]
+deny = ["unmaintained", "unsound"]
+format = "terminal"
+quiet = false
