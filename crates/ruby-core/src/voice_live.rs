@@ -869,12 +869,15 @@ mod tests {
             .await
             .expect("consequential tool handled");
         assert_eq!(write_res["status"], "requires_confirmation");
-        let code = write_res["code"].as_str().expect("confirmation code");
-        assert_eq!(code.len(), 4, "Code must be 4 digits");
+        // Verify model output does NOT leak the live code (Z2)
+        assert!(write_res.get("code").is_none());
         assert!(write_res["message"]
             .as_str()
             .unwrap()
             .contains("[DATA_OUTPUT]"));
+        // The code was registered with 6 digits in the unified confirmation manager
+        let pending = confirmation_mgr.get_pending_action().expect("pending action");
+        assert_eq!(pending.code.len(), 6);
 
         // 3. Unknown tool -> denied by default
         let unknown_res = dispatcher

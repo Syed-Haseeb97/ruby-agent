@@ -2,6 +2,9 @@ import React, { useEffect, useState, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { OrbPreviewPanel } from "./OrbPreviewPanel";
+import { SettingsPanel } from "./SettingsPanel";
+import { DoctorModal } from "./DoctorModal";
+import { SetupWizard } from "./SetupWizard";
 
 interface RemoteStatus {
   enabled: boolean;
@@ -50,6 +53,9 @@ interface ComputerUseStatus {
 export const ConsoleView: React.FC = () => {
   const [notice, setNotice] = useState<string | null>(null);
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatus | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDoctorOpen, setIsDoctorOpen] = useState(false);
+  const [isWizardOpen, setIsWizardOpen] = useState(false);
   const [messages, setMessages] = useState<MessageItem[]>([
     {
       id: "welcome-1",
@@ -343,6 +349,14 @@ export const ConsoleView: React.FC = () => {
   }, [cuIsActing, liveStatus]);
 
   useEffect(() => {
+    invoke<boolean>("is_first_run")
+      .then((first) => {
+        if (first) {
+          setIsWizardOpen(true);
+        }
+      })
+      .catch(() => {});
+
     fetchRemoteStatus();
     fetchCuStatus();
     fetchLiveStatus();
@@ -508,6 +522,40 @@ export const ConsoleView: React.FC = () => {
             >
               <span>TAURI 2.0 • M2 CONVERSATIONAL ENGINE</span>
             </div>
+            <button
+              onClick={() => setIsDoctorOpen(true)}
+              style={{
+                borderRadius: "9999px",
+                border: "1px solid #C8C2B5",
+                backgroundColor: "#FFFFFF",
+                padding: "0.25rem 0.875rem",
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                color: "#16181D",
+                cursor: "pointer",
+              }}
+            >
+              Doctor
+            </button>
+            <button
+              onClick={() => setIsSettingsOpen(true)}
+              style={{
+                borderRadius: "9999px",
+                border: "1px solid #C8C2B5",
+                backgroundColor: "#FFFFFF",
+                padding: "0.25rem 0.875rem",
+                fontFamily: "'Geist Mono', monospace",
+                fontSize: "11px",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                color: "#16181D",
+                cursor: "pointer",
+              }}
+            >
+              Settings
+            </button>
           </div>
         </header>
 
@@ -1861,6 +1909,10 @@ export const ConsoleView: React.FC = () => {
           <OrbPreviewPanel />
         </section>
       </div>
+
+      <SettingsPanel isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <DoctorModal isOpen={isDoctorOpen} onClose={() => setIsDoctorOpen(false)} />
+      <SetupWizard isOpen={isWizardOpen} onComplete={() => setIsWizardOpen(false)} />
     </div>
   );
 };

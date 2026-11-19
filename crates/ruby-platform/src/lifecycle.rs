@@ -383,7 +383,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let reporter = CrashReporter::new(temp.path().to_path_buf());
 
-        let panic_str = "Thread panicked with token ghp_1234567890abcdefghijklmnopqrstuvwxyz at line 42";
+        let fake_token = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
+        let panic_str = format!("Thread panicked with token {} at line 42", fake_token);
         let dump_path = reporter
             .write_crash_dump(panic_str, Some("main.rs:42"))
             .unwrap();

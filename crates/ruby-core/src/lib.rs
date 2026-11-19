@@ -6,9 +6,12 @@
 //! Task states are kept strictly separate from the Orb emotion enum.
 
 pub mod chat;
+pub mod doctor;
 pub mod tasks;
 pub mod tts;
 pub mod voice_live;
+
+pub use doctor::{DiagnosticItem, DiagnosticStatus, DoctorReport, RubyDoctor};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

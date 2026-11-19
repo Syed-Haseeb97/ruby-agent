@@ -230,7 +230,12 @@ pub fn run() {
         commands::list_background_jobs,
         commands::get_background_job,
         commands::cancel_background_job,
-        commands::get_background_job_logs
+        commands::get_background_job_logs,
+        commands::run_doctor,
+        commands::get_app_config,
+        commands::save_app_config,
+        commands::get_secrets_status,
+        commands::is_first_run
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -260,7 +265,12 @@ pub fn run() {
         commands::list_background_jobs,
         commands::get_background_job,
         commands::cancel_background_job,
-        commands::get_background_job_logs
+        commands::get_background_job_logs,
+        commands::run_doctor,
+        commands::get_app_config,
+        commands::save_app_config,
+        commands::get_secrets_status,
+        commands::is_first_run
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);
