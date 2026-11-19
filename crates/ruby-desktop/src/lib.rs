@@ -46,6 +46,8 @@ pub struct AppState {
     pub computer_use_active_goal: Arc<Mutex<Option<String>>>,
     pub voice_live_manager: Arc<ruby_core::voice_live::VoiceLiveManager>,
     pub bg_supervisor: Arc<ruby_core::tasks::BackgroundTaskSupervisor>,
+    pub logger: Arc<ruby_core::RedactedJsonLogger>,
+    pub metrics: Arc<ruby_core::MetricsCollector>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -158,7 +160,7 @@ pub fn run() {
             .unwrap_or_else(|_| ruby_core::tasks::SqliteJobStore::new_in_memory().unwrap()),
     );
     let tool_backend = Arc::new(ruby_core::tasks::LocalToolBackend::new(
-        ruby_paths.workspace_dir,
+        ruby_paths.workspace_dir.clone(),
         false,
     ));
     let bg_supervisor = Arc::new(ruby_core::tasks::BackgroundTaskSupervisor::new(
@@ -167,6 +169,11 @@ pub fn run() {
         300,
     ));
     remote_adapter.set_background_supervisor(Arc::clone(&bg_supervisor));
+
+    let log_dir = ruby_paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("logs");
+    let logger = Arc::new(ruby_core::RedactedJsonLogger::new(log_dir));
+    let metrics = Arc::new(ruby_core::MetricsCollector::new());
+    remote_adapter.set_metrics_collector(Arc::clone(&metrics));
 
     #[cfg(windows)]
     {
@@ -200,6 +207,8 @@ pub fn run() {
         computer_use_active_goal: Arc::clone(&computer_use_active_goal),
         voice_live_manager: Arc::clone(&voice_live_manager),
         bg_supervisor: Arc::clone(&bg_supervisor),
+        logger: Arc::clone(&logger),
+        metrics: Arc::clone(&metrics),
     });
 
     #[cfg(feature = "test-capture")]
@@ -235,7 +244,9 @@ pub fn run() {
         commands::get_app_config,
         commands::save_app_config,
         commands::get_secrets_status,
-        commands::is_first_run
+        commands::is_first_run,
+        commands::get_recent_logs,
+        commands::get_system_metrics
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -270,7 +281,9 @@ pub fn run() {
         commands::get_app_config,
         commands::save_app_config,
         commands::get_secrets_status,
-        commands::is_first_run
+        commands::is_first_run,
+        commands::get_recent_logs,
+        commands::get_system_metrics
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);

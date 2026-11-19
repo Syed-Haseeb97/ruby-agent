@@ -50,6 +50,7 @@ pub struct TelegramAdapter {
     voice_live_mgr: Arc<Mutex<Option<Arc<ruby_core::voice_live::VoiceLiveManager>>>>,
     tool_mgr: Arc<Mutex<Option<Arc<ruby_mcp::PolicyGatedToolManager>>>>,
     screen_capturer: Arc<Mutex<Option<Arc<dyn RemoteScreenCapturer>>>>,
+    metrics: Arc<Mutex<Option<Arc<ruby_core::MetricsCollector>>>>,
 }
 
 impl TelegramAdapter {
@@ -90,7 +91,12 @@ impl TelegramAdapter {
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
             screen_capturer: Arc::new(Mutex::new(None)),
+            metrics: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_metrics_collector(&self, collector: Arc<ruby_core::MetricsCollector>) {
+        *self.metrics.lock().unwrap() = Some(collector);
     }
 
     pub fn set_screen_capturer(&self, capturer: Arc<dyn RemoteScreenCapturer>) {
@@ -152,6 +158,7 @@ impl TelegramAdapter {
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
             screen_capturer: Arc::new(Mutex::new(None)),
+            metrics: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -181,6 +188,7 @@ impl TelegramAdapter {
             voice_live_mgr: Arc::new(Mutex::new(None)),
             tool_mgr: Arc::new(Mutex::new(None)),
             screen_capturer: Arc::new(Mutex::new(None)),
+            metrics: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -543,35 +551,54 @@ impl TelegramAdapter {
                 self.send_redacted_reply(chat_id, &reply).await?;
             }
             "/logs" => {
-                let raw_logs = {
-                    let guard = self.bg_supervisor.lock().unwrap();
-                    if let Some(supervisor) = guard.as_ref() {
-                        ruby_core::tasks::handle_background_command(
-                            supervisor,
-                            "/logs",
-                            args.trim(),
-                        )
+                let trimmed = args.trim();
+                let is_uuid = uuid::Uuid::parse_str(trimmed).is_ok();
+                let redacted = if !trimmed.is_empty() && is_uuid {
+                    let raw_logs = {
+                        let guard = self.bg_supervisor.lock().unwrap();
+                        if let Some(supervisor) = guard.as_ref() {
+                            ruby_core::tasks::handle_background_command(
+                                supervisor,
+                                "/logs",
+                                trimmed,
+                            )
+                        } else {
+                            "Mode B Background Supervisor is not initialized.".to_string()
+                        }
+                    };
+                    redact_sensitive_content(&raw_logs, None)
+                } else {
+                    let n = trimmed.parse::<usize>().unwrap_or(10).min(50);
+                    let paths = ruby_config::RubyPaths::resolve();
+                    let log_dir = paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("logs");
+                    let logger = ruby_core::logging::RedactedJsonLogger::new(log_dir);
+                    let recent = logger.get_recent_logs(None, n);
+                    if recent.is_empty() {
+                        "No system logs recorded yet.".to_string()
                     } else {
-                        "Mode B Background Supervisor is not initialized.".to_string()
+                        let mut lines = vec![format!("📋 Last {} Redacted System Logs:", recent.len())];
+                        for e in recent {
+                            lines.push(format!("[{}] {} {}: {}", e.timestamp, e.level, e.target, e.message));
+                        }
+                        lines.join("\n")
                     }
                 };
-                let redacted = redact_sensitive_content(&raw_logs, None);
                 self.audit_logger
                     .log_entry(sender_id, None, "logs", "query");
 
                 if redacted.len() > 4000 {
                     let preview = format!(
-                        "📋 Logs for task (preview):\n{}\n\n[Full logs attached as document]",
+                        "📋 Logs (preview):\n{}\n\n[Full logs attached as document]",
                         &redacted[..500.min(redacted.len())]
                     );
                     self.send_redacted_reply(chat_id, &preview).await?;
-                    let doc_name = format!("task_logs_{}.txt", args.trim());
+                    let doc_name = format!("logs_{}.txt", if trimmed.is_empty() { "system" } else { trimmed });
                     self.client
                         .send_document(
                             chat_id,
                             &doc_name,
                             redacted.as_bytes(),
-                            Some("Full task logs"),
+                            Some("Full logs"),
                         )
                         .await?;
                 } else {
@@ -644,7 +671,7 @@ impl TelegramAdapter {
             "/status" => {
                 let power = get_system_power_status();
                 let active_tasks = self.task_mgr.active_task_count();
-                let status_reply = format!(
+                let mut status_reply = format!(
                     "Ruby Laptop Status:\n\
                     • State: Active & Polling\n\
                     • Power: {}\n\
@@ -652,6 +679,10 @@ impl TelegramAdapter {
                     • Active Tasks: {}",
                     power.battery_status_desc, power.uptime_desc, active_tasks
                 );
+                if let Some(ref m) = *self.metrics.lock().unwrap() {
+                    status_reply.push_str("\n\n");
+                    status_reply.push_str(&m.format_status_report());
+                }
                 self.audit_logger
                     .log_entry(sender_id, None, "status", "success");
                 self.send_redacted_reply(chat_id, &status_reply).await?;

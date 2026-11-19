@@ -7,11 +7,15 @@
 
 pub mod chat;
 pub mod doctor;
+pub mod logging;
+pub mod metrics;
 pub mod tasks;
 pub mod tts;
 pub mod voice_live;
 
 pub use doctor::{DiagnosticItem, DiagnosticStatus, DoctorReport, RubyDoctor};
+pub use logging::{LogEntry, RedactedJsonLogger};
+pub use metrics::{MetricsCollector, SystemMetricsSnapshot};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

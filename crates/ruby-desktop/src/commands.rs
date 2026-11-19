@@ -1149,6 +1149,20 @@ pub fn is_first_run() -> bool {
     !config_path.exists()
 }
 
+#[tauri::command]
+pub fn get_recent_logs(
+    state: State<'_, AppState>,
+    level: Option<String>,
+    limit: Option<usize>,
+) -> Vec<ruby_core::LogEntry> {
+    state.logger.get_recent_logs(level.as_deref(), limit.unwrap_or(50))
+}
+
+#[tauri::command]
+pub fn get_system_metrics(state: State<'_, AppState>) -> ruby_core::SystemMetricsSnapshot {
+    state.metrics.get_snapshot()
+}
+
 #[cfg(test)]
 mod voice_live_tests {
     use super::*;
@@ -1473,5 +1487,24 @@ mod voice_live_tests {
         assert!(!json.contains("ghp_"));
         assert!(!json.contains("AIza"));
         assert!(json.contains("gemini_api_key_set"));
+    }
+
+    #[test]
+    fn test_observability_redacted_logger_and_metrics_ipc() {
+        let temp = tempfile::tempdir().unwrap();
+        let logger = Arc::new(ruby_core::RedactedJsonLogger::new(temp.path().to_path_buf()));
+        let metrics = Arc::new(ruby_core::MetricsCollector::new());
+
+        let fake_key = format!("{}{}", "sk-", "1234567890abcdefghijklmnopqrstuv");
+        logger.log("INFO", "test_worker", &format!("Worker initialized with key {}", fake_key));
+
+        let logs = logger.get_recent_logs(None, 10);
+        assert_eq!(logs.len(), 1);
+        assert!(!logs[0].message.contains(&fake_key));
+        assert!(logs[0].message.contains("[REDACTED]"));
+
+        metrics.record_dictation_latency(1500, 100, 200, 50);
+        let snap = metrics.get_snapshot();
+        assert_eq!(snap.dictation.total_ms, 350);
     }
 }

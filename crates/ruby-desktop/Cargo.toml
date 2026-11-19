@@ -36,6 +36,9 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dwm",
 ] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 default = []
 test-capture = []

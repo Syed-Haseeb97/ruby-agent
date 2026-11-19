@@ -1954,6 +1954,92 @@ fn test_telegram_error_classification_types() {
     assert_eq!(err401.to_string(), "Telegram 401 Unauthorized: Token revoked or invalid");
 }
 
+// 15. Telegram /status includes rich metrics & /logs redacts secrets
+#[tokio::test]
+async fn test_telegram_logs_command_redaction_and_metrics_status() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(12345),
+        allowed_roots: vec![],
+        allow_screenshots: false,
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file.clone()),
+    );
+
+    let metrics = Arc::new(ruby_core::MetricsCollector::new());
+    metrics.record_dictation_latency(2000, 100, 300, 50);
+    metrics.record_fallback("timeout");
+    adapter.set_metrics_collector(Arc::clone(&metrics));
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // 1. Test /status
+    let status_update = serde_json::json!({
+        "update_id": 1,
+        "message": {
+            "message_id": 101,
+            "from": { "id": 12345 },
+            "chat": { "id": 12345, "type": "private" },
+            "date": now_secs,
+            "text": "/status"
+        }
+    });
+    let handled = adapter.process_update(status_update, now_secs).await.unwrap();
+    assert_eq!(handled, Some(1));
+
+    let sent = mock.sent_messages.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    let status_text = sent[0]["text"].as_str().unwrap();
+    assert!(status_text.contains("Ruby Laptop Status"));
+    assert!(status_text.contains("Ruby System Status & Health"));
+    assert!(status_text.contains("timeout=1"));
+
+    // 2. Test /logs redacts planted secrets
+    let log_dir = temp_dir.path().join("logs");
+    let logger = ruby_core::RedactedJsonLogger::new(log_dir.clone());
+    let fake_token = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
+    logger.log("WARN", "auth_module", &format!("Token rejected: {}", fake_token));
+
+    mock.sent_messages.lock().unwrap().clear();
+    let logs_update = serde_json::json!({
+        "update_id": 2,
+        "message": {
+            "message_id": 102,
+            "from": { "id": 12345 },
+            "chat": { "id": 12345, "type": "private" },
+            "date": now_secs,
+            "text": "/logs 5"
+        }
+    });
+    let handled2 = adapter.process_update(logs_update, now_secs).await.unwrap();
+    assert_eq!(handled2, Some(2));
+
+    let sent2 = mock.sent_messages.lock().unwrap().clone();
+    assert_eq!(sent2.len(), 1);
+    let logs_text = sent2[0]["text"].as_str().unwrap();
+    assert!(!logs_text.contains(&fake_token), "Telegram /logs must NEVER leak secret tokens");
+}
+
 // 12. Opt-in live test: sends one message to paired chat and prints reply latency
 #[cfg(feature = "live-telegram")]
 #[tokio::test]
