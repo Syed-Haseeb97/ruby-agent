@@ -51,6 +51,9 @@ jobs:
       - name: Run Secret and Security Scanner
         run: python acceptance/secret_scan.py --all
 
+      - name: Run Negative Secret Scanner Verification
+        run: python acceptance/test_secret_scanner_negative.py
+
       - name: Verify Code Formatting
         run: cargo fmt --check
 

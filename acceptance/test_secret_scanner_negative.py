@@ -11,7 +11,7 @@ def test_negative_secret_scan():
     tg_token = "123456789" + ":" + "abcdefghijklmnopqrstuvwxyz123456789"
     gh_pat = "ghp_" + "1234567890abcdefghijklmnopqrstuvwxyz"
     gh_fine = "github_pat_" + "1234567890abcdefghijklmnopqrstuvwxyz1234"
-    priv_key = "-----" + "BEGIN RSA PRIVATE KEY" + "-----\n" + "MIIEowIBAAKCAQEA0"
+    priv_key = "-----" + "BEGIN" + " " + "RSA" + " " + "PRIVATE" + " " + "KEY" + "-----\n" + "MIIEowIBAAKCAQEA0"
     aws_key = "AKIA" + "IOSFODNN7EXAMPLE"
     hardcoded_assign = "api_key" + " = '1234567890abcdefghij'"
 

@@ -516,14 +516,14 @@ impl LocalToolBackend {
                     })?;
                 } else {
                     let desc = format!("Execute advanced shell command '{cmd}'");
-                    let code = mgr.register_action(
+                    let _code = mgr.register_action(
                         "shell",
                         "execute_command",
                         serde_json::json!({ "cmd": cmd, "args": args }),
                         &desc,
                     );
                     return Err(CoreError::Execution(format!(
-                        "Advanced shell requires confirmation: {desc}. Code: {code}"
+                        "Advanced shell requires user confirmation: {desc}. Awaiting user approval via Console or Telegram."
                     )));
                 }
             }
@@ -1116,15 +1116,19 @@ mod tests {
         let res = backend.execute_command("whoami", &[]).await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err().to_string();
-        assert!(err_msg.contains("Advanced shell requires confirmation"));
-        assert!(err_msg.contains("Code:"));
+        assert!(err_msg.contains("Advanced shell requires user confirmation"));
+        // Model-visible error strictly omits the confirmation code per Z2
+        assert!(!err_msg.contains("Code:"));
 
-        // Extract code
-        let code = err_msg.split("Code: ").nth(1).unwrap().trim();
-        assert_eq!(code.len(), 4);
+        // User retrieves pending code securely from user surface (ConfirmationManager)
+        let pending = conf_mgr
+            .get_pending_action()
+            .expect("Action must be registered in confirmation manager");
+        let code = pending.code;
+        assert_eq!(code.len(), 6);
 
         // 2. Set confirmed code and execute
-        backend.set_confirmed_code(code);
+        backend.set_confirmed_code(&code);
         let res2 = backend.execute_command("whoami", &[]).await;
         assert!(res2.is_ok(), "Confirmed command must succeed: {:?}", res2);
     }

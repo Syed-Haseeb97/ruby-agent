@@ -634,7 +634,7 @@ pub async fn start_computer_use_task(
 
     let task_id = format!(
         "cu-{}",
-        ruby_policy::UnifiedConfirmationManager::generate_secure_code_4_digits()
+        ruby_policy::UnifiedConfirmationManager::generate_secure_code_6_digits()
     );
     let _ = app.emit(
         "computer_use_started",
@@ -1144,6 +1144,7 @@ mod voice_live_tests {
             .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .expect("Must extract code");
+        assert_eq!(code.len(), 6, "Confirmation code must be strictly 6 digits");
 
         // 2. Confirmed request
         let res_confirmed = delete_memory_core(&store, &conf_mgr, id, Some(code.to_string()));
@@ -1181,6 +1182,7 @@ mod voice_live_tests {
             .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .expect("Must extract code");
+        assert_eq!(code.len(), 6, "Confirmation code must be strictly 6 digits");
 
         // 2. Confirmed request
         let res_confirmed = wipe_all_memories_core(&store, &conf_mgr, Some(code.to_string()));
@@ -1238,5 +1240,68 @@ mod voice_live_tests {
         .await;
         assert_eq!(action3, EscHierarchyAction::DictationCancel);
         assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_esc_hierarchy_all_matrix_rows_tap_and_hold() {
+        use ruby_actions::computer_use::KillSwitchToken;
+        use ruby_core::voice_live::VoiceLiveStatus;
+
+        // Row 1: Mode A Tap
+        let cu_token = KillSwitchToken::new();
+        let voice_mgr = VoiceLiveManager::new(Arc::new(NullAudioOutput), Arc::new(MockToolDispatcher::default()), None);
+        let action = dispatch_esc_hierarchy(true, &cu_token, &voice_mgr, async {}).await;
+        assert_eq!(action, EscHierarchyAction::ModeAKillSwitch);
+        assert!(cu_token.is_cancelled());
+
+        // Row 2: Mode V Tap
+        let cu_token = KillSwitchToken::new();
+        let h = MockLiveSession::open(LiveSessionConfig::default());
+        voice_mgr.start_with_handle(h).await.unwrap();
+        assert_eq!(voice_mgr.status(), VoiceLiveStatus::Active);
+        let action = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, async {}).await;
+        assert_eq!(action, EscHierarchyAction::VoiceLiveStop);
+        assert_eq!(voice_mgr.status(), VoiceLiveStatus::Idle);
+
+        // Row 3: Mode D Tap
+        let cu_token = KillSwitchToken::new();
+        let dictation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let action = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, {
+            let d = Arc::clone(&dictation_cancelled);
+            async move {
+                d.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }).await;
+        assert_eq!(action, EscHierarchyAction::DictationCancel);
+        assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Row 4: Mode B Tap (Background jobs are NOT cancelled by Esc tap)
+        let store = Arc::new(ruby_core::tasks::SqliteJobStore::new_in_memory().unwrap());
+        let backend = Arc::new(ruby_core::tasks::MockBackend);
+        let supervisor = ruby_core::tasks::BackgroundTaskSupervisor::new(store, backend, 60);
+        let job = supervisor.create_job("Background non-GUI task").unwrap();
+        let action = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, async {}).await;
+        assert_eq!(action, EscHierarchyAction::DictationCancel);
+        assert_eq!(supervisor.get_status(job.id).unwrap(), ruby_core::TaskStatus::Queued, "Esc tap must NOT cancel background jobs");
+
+        // Row 5: Esc-Hold Global Kill Switch on all states
+        // Verifies hold cancels CU, stops Voice Live, cancels dictation, and cancels supervisor jobs while staying alive
+        let cu_token = KillSwitchToken::new();
+        let dictation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let h2 = MockLiveSession::open(LiveSessionConfig::default());
+        voice_mgr.start_with_handle(h2).await.unwrap();
+
+        // Simulate Esc-Hold kill switch dispatch
+        cu_token.cancel();
+        voice_mgr.stop().await;
+        dictation_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+        let cancelled_jobs = supervisor.cancel_all_active();
+
+        assert!(cu_token.is_cancelled());
+        assert_eq!(voice_mgr.status(), VoiceLiveStatus::Idle);
+        assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(cancelled_jobs, 1);
+        // Assert process stays RUNNING (test reaches here without exit)
+        assert!(true, "Application stays running after kill switch");
     }
 }

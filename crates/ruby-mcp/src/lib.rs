@@ -38,7 +38,7 @@ pub enum McpError {
     Network(String),
     #[error("Policy error: {0}")]
     Policy(#[from] PolicyError),
-    #[error("Tool '{tool_name}' requires confirmation: {description}. Reply /yes {code} or /no")]
+    #[error("Tool '{tool_name}' requires user confirmation: {description}. Awaiting user authorization via Console or Telegram.")]
     RequiresConfirmation {
         code: String,
         tool_name: String,
@@ -1017,7 +1017,7 @@ mod tests {
                 code, tool_name, ..
             }) => {
                 assert_eq!(tool_name, "write_file");
-                assert_eq!(code.len(), 4);
+                assert_eq!(code.len(), 6);
 
                 // User replies with confirmation
                 let executed = manager.confirm_and_execute(&code).await.unwrap();
@@ -1039,7 +1039,7 @@ mod tests {
                 code, tool_name, ..
             }) => {
                 assert_eq!(tool_name, "delete_file");
-                assert_eq!(code.len(), 4);
+                assert_eq!(code.len(), 6);
             }
             other => panic!("Expected RequiresConfirmation, got {:?}", other),
         }
@@ -1192,7 +1192,7 @@ mod tests {
                 code, tool_name, ..
             }) => {
                 assert_eq!(tool_name, "delete_memory");
-                assert_eq!(code.len(), 4);
+                assert_eq!(code.len(), 6);
                 // Confirm with code
                 let output = manager.confirm_and_execute(&code).await.unwrap();
                 assert!(output.contains("deleted"));
@@ -1209,12 +1209,64 @@ mod tests {
                 code, tool_name, ..
             }) => {
                 assert_eq!(tool_name, "wipe_all");
-                assert_eq!(code.len(), 4);
+                assert_eq!(code.len(), 6);
                 // Confirm with code
                 let output = manager.confirm_and_execute(&code).await.unwrap();
                 assert!(output.contains("wiped"));
             }
             other => panic!("Expected RequiresConfirmation, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_no_live_pending_confirmation_code_ever_leaks_to_model_visible_outputs() {
+        use ruby_memory::{MemoryStore, SqliteMemoryStore};
+
+        let policy = Arc::new(DefaultToolSecurityPolicy::default());
+        let sidecar = Arc::new(PlaywrightSidecarManager::new(
+            McpRegistry::default_playwright_config(),
+        ));
+        let manager = PolicyGatedToolManager::new(policy, sidecar);
+        let mem_store = Arc::new(SqliteMemoryStore::open_in_memory().unwrap());
+        let id = mem_store.add_memory("fact", "Sensitive memory").unwrap();
+        manager.set_memory_store(mem_store).await;
+
+        // Model requests memory deletion -> requires confirmation
+        let res = manager
+            .execute_tool("memory", "delete_memory", serde_json::json!({ "id": id }))
+            .await;
+
+        let err = match res {
+            Err(e) => e,
+            Ok(_) => panic!("Destructive action must require confirmation"),
+        };
+
+        // 1. Check the error Display text that would be passed to the model as tool error
+        let model_visible_error = err.to_string();
+        assert!(model_visible_error.contains("requires user confirmation"));
+
+        // Retrieve active pending code from the confirmation manager
+        let active_code = match &err {
+            McpError::RequiresConfirmation { code, .. } => code.clone(),
+            _ => panic!("Expected RequiresConfirmation"),
+        };
+        assert_eq!(active_code.len(), 6);
+
+        // 2. Strict Z2 check: The code must NEVER appear in the model-visible error string
+        assert!(
+            !model_visible_error.contains(&active_code),
+            "Model-visible error string leaked live pending confirmation code: '{}'",
+            model_visible_error
+        );
+
+        // 3. Scan for any 6-digit confirmation pattern in model-visible error string
+        let has_6digit_code = model_visible_error
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|w| w.len() == 6);
+        assert!(
+            !has_6digit_code,
+            "Model-visible error string contained a 6-digit code: '{}'",
+            model_visible_error
+        );
     }
 }

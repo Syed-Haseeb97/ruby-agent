@@ -43,9 +43,14 @@ impl ConfirmationManager {
         self.inner.clone()
     }
 
-    /// Generates a cryptographically secure 4-digit code using OS CSPRNG.
+    /// Generates a cryptographically secure 6-digit code using OS CSPRNG.
+    pub fn generate_secure_code_6_digits() -> String {
+        UnifiedConfirmationManager::generate_secure_code_6_digits()
+    }
+
+    /// Alias for backwards compatibility, returning 6 digits everywhere per Z2.
     pub fn generate_secure_code_4_digits() -> String {
-        UnifiedConfirmationManager::generate_secure_code_4_digits()
+        UnifiedConfirmationManager::generate_secure_code_6_digits()
     }
 
     /// Registers a pending action and returns the random 4-digit code.

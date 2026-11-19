@@ -319,6 +319,10 @@ pub fn run() {
             let cu_active_goal = Arc::clone(&cu_active_goal_setup);
             let vl_manager = Arc::clone(&vl_manager_setup);
             let bg_supervisor_thread = Arc::clone(&bg_supervisor_setup);
+            let seq_counter_cb = Arc::clone(&seq_counter_setup);
+            let orb_state_cb = Arc::clone(&orb_state_setup);
+            let seq_counter_thread = Arc::clone(&seq_counter_setup);
+            let orb_state_thread = Arc::clone(&orb_state_setup);
 
             std::thread::spawn(move || {
                 let kill_switch = Arc::new(AtomicBool::new(false));
@@ -340,8 +344,8 @@ pub fn run() {
                             "Error" => OperationalState::Error,
                             _ => OperationalState::Idle,
                         };
-                        let seq = seq_counter_setup.fetch_add(1, Ordering::SeqCst) + 1;
-                        let mut orb = orb_state_setup.lock().unwrap();
+                        let seq = seq_counter_cb.fetch_add(1, Ordering::SeqCst) + 1;
+                        let mut orb = orb_state_cb.lock().unwrap();
                         orb.operational = op;
                         let payload = SequencedOrbEvent { seq, state: *orb };
                         let _ = app_handle_cb.emit("orb_state_changed", payload);
@@ -454,7 +458,20 @@ pub fn run() {
                                         let exec = ruby_actions::computer_use::WindowsComputerUseExecutor::new(false);
                                         let _ = exec.release_all_held_inputs().await;
                                     }
-                                    std::process::exit(0);
+                                    let _ = app_handle.emit(
+                                        "kill_switch_triggered",
+                                        serde_json::json!({
+                                            "status": "engaged",
+                                            "notice": "KILL SWITCH ENGAGED (1200ms Esc-hold): All active operations aborted. Synthetic inputs released. Ruby remains running.",
+                                        }),
+                                    );
+                                    // Notice to console UI and orb: stays RUNNING per Z1!
+                                    {
+                                        let mut orb = orb_state_thread.lock().unwrap();
+                                        orb.operational = OperationalState::Idle;
+                                        let seq = seq_counter_thread.fetch_add(1, Ordering::SeqCst) + 1;
+                                        let _ = app_handle.emit("orb_state_changed", &SequencedOrbEvent { seq, state: *orb });
+                                    }
                                 }
                             }
                         }

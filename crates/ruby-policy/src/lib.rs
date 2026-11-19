@@ -758,16 +758,21 @@ impl UnifiedConfirmationManager {
         }
     }
 
-    /// Generates a cryptographically secure 4-digit code (1000..=9999) using OS CSPRNG.
-    pub fn generate_secure_code_4_digits() -> String {
+    /// Generates a cryptographically secure 6-digit code (100000..=999999) using OS CSPRNG.
+    pub fn generate_secure_code_6_digits() -> String {
         let mut bytes = [0u8; 4];
         getrandom::getrandom(&mut bytes).expect("OS CSPRNG must be available");
         let num = u32::from_ne_bytes(bytes);
-        let code = (num % 9000) + 1000;
-        format!("{:04}", code)
+        let code = (num % 900_000) + 100_000;
+        format!("{:06}", code)
     }
 
-    /// Registers a pending action and returns the secure 4-digit code.
+    /// Alias for backwards compatibility, returning 6 digits everywhere per Z2.
+    pub fn generate_secure_code_4_digits() -> String {
+        Self::generate_secure_code_6_digits()
+    }
+
+    /// Registers a pending action and returns the secure 6-digit code.
     pub fn register_action(
         &self,
         server: &str,
@@ -775,7 +780,7 @@ impl UnifiedConfirmationManager {
         arguments: serde_json::Value,
         description: &str,
     ) -> String {
-        let code = Self::generate_secure_code_4_digits();
+        let code = Self::generate_secure_code_6_digits();
         let now = Instant::now();
         let action = PendingUnifiedAction {
             id: uuid::Uuid::new_v4().to_string(),
@@ -877,20 +882,15 @@ impl UnifiedConfirmationManager {
         }
     }
 
-    /// Inspects whether there is a pending action without consuming it.
-    pub fn get_pending_summary(&self) -> Option<(String, Duration)> {
-        if let Ok(lock) = self.pending.lock() {
-            if let Some(action) = lock.as_ref() {
-                let now = Instant::now();
-                if now <= action.expires_at {
-                    return Some((
-                        action.description.clone(),
-                        action.expires_at.duration_since(now),
-                    ));
-                }
-            }
+    /// Returns the active pending action without consuming it (for user surfaces only: Console / Telegram).
+    pub fn get_pending_action(&self) -> Option<PendingUnifiedAction> {
+        let lock = self.pending.lock().ok()?;
+        let action = lock.as_ref()?;
+        if Instant::now() <= action.expires_at {
+            Some(action.clone())
+        } else {
+            None
         }
-        None
     }
 }
 
@@ -1325,18 +1325,18 @@ mod tests {
     fn test_unified_confirmation_manager_lifecycle_ttl_and_attempt_capping() {
         let mgr = UnifiedConfirmationManager::new();
 
-        // 1. Generate code check CSPRNG bounds (1000..=9999)
+        // 1. Generate code check CSPRNG bounds (100000..=999999) - Strictly 6 digits everywhere per Z2
         for _ in 0..20 {
-            let code = UnifiedConfirmationManager::generate_secure_code_4_digits();
-            assert_eq!(code.len(), 4);
+            let code = UnifiedConfirmationManager::generate_secure_code_6_digits();
+            assert_eq!(code.len(), 6);
             let val = code.parse::<u32>().unwrap();
-            assert!((1000..=9999).contains(&val));
+            assert!((100_000..=999_999).contains(&val));
         }
 
         // 2. Action registration and exact action binding
         let args = serde_json::json!({ "path": "test.txt", "content": "hello" });
         let code = mgr.register_action("fs", "write_file", args.clone(), "Write test file");
-        assert_eq!(code.len(), 4);
+        assert_eq!(code.len(), 6);
 
         // 3. Failed attempts capped at 5 -> drops action
         for remaining in (1..5).rev() {

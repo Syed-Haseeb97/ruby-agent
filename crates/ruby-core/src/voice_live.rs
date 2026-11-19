@@ -189,16 +189,17 @@ impl LiveToolDispatcher for PolicyGatedLiveToolDispatcher {
             ruby_policy::RiskClass::Write
             | ruby_policy::RiskClass::Destructive
             | ruby_policy::RiskClass::ExternalNetwork => {
-                let code = self.confirmation_mgr.register_action(
+                let _code = self.confirmation_mgr.register_action(
                     "voice_live",
                     name,
                     args.clone(),
                     &format!("Voice Live action: {} with args {}", name, args),
                 );
+                // The code is sent ONLY to the user's paired Telegram / Console dialog.
+                // Model-visible response strictly redacts the pending confirmation code.
                 Ok(serde_json::json!({
                     "status": "requires_confirmation",
-                    "code": code,
-                    "message": format!("[DATA_OUTPUT]\nAction '{}' requires user confirmation code {}. Confirm via Console or Telegram.\n[/DATA_OUTPUT]", name, code)
+                    "message": format!("[DATA_OUTPUT]\nAction '{}' requires user confirmation. Awaiting user authorization via Console or Telegram.\n[/DATA_OUTPUT]", name)
                 }))
             }
             ruby_policy::RiskClass::Unknown => Err(VoiceLiveError::Tool(format!(

@@ -1060,17 +1060,17 @@ fn test_code_generators_use_csprng() {
         "CSPRNG must generate diverse non-colliding values"
     );
 
-    let mut generated_4_digit = HashSet::new();
+    let mut generated_6_digit = HashSet::new();
     for _ in 0..100 {
-        let code = ConfirmationManager::generate_secure_code_4_digits();
-        assert_eq!(code.len(), 4);
-        let num: u32 = code.parse().expect("must be a valid 4-digit number");
-        assert!((1_000..=9_999).contains(&num));
-        generated_4_digit.insert(code);
+        let code = ConfirmationManager::generate_secure_code_6_digits();
+        assert_eq!(code.len(), 6);
+        let num: u32 = code.parse().expect("must be a valid 6-digit number");
+        assert!((100_000..=999_999).contains(&num));
+        generated_6_digit.insert(code);
     }
     assert!(
-        generated_4_digit.len() >= 80,
-        "CSPRNG must generate diverse 4-digit codes"
+        generated_6_digit.len() >= 80,
+        "CSPRNG must generate diverse 6-digit codes"
     );
 }
 
