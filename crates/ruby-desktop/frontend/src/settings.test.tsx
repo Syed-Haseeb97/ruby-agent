@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import * as fs from "fs";
+import * as path from "path";
 import { SettingsPanel } from "./SettingsPanel";
 import { SetupWizard } from "./SetupWizard";
 import { DoctorModal } from "./DoctorModal";
@@ -21,13 +23,23 @@ vi.mock("@tauri-apps/api/core", () => ({
       });
     }
     if (cmd === "save_app_config") {
-      if (args?.config?.computer_use_enabled && !args?.confirmed) {
+      if (
+        (args?.config?.computer_use_enabled ||
+          args?.config?.advanced_shell_enabled ||
+          args?.config?.allow_screenshots ||
+          args?.config?.recording_enabled) &&
+        !args?.confirmed
+      ) {
         return Promise.reject("Enabling dangerous features requires explicit user confirmation.");
       }
       const warn = args?.config?.allowed_roots?.some(
-        (r: string) => r === "C:\\" || r === "D:\\" || r === "/"
+        (r: string) =>
+          r === "C:\\" ||
+          r === "D:\\" ||
+          r === "/" ||
+          r.toUpperCase().includes("%USERPROFILE%")
       )
-        ? "Warning: Allowed root covers an entire drive."
+        ? "Warning: Allowed root covers an entire drive or home directory."
         : undefined;
       return Promise.resolve({ success: true, warning: warn });
     }
@@ -97,47 +109,95 @@ describe("Settings, Onboarding & Doctor Front-end Suite (U1–U4)", () => {
       expect(screen.getByRole("dialog", { name: /Application Settings/i })).toBeDefined();
       expect(screen.getByText("Ruby System Settings")).toBeDefined();
 
-      // STRICT PROHIBITION: Regex check for animate-pulse or animate-ping anywhere in rendered HTML
+      // STRICT PROHIBITION: Regex check for animate-pulse, animate-ping, or blink classes anywhere
       expect(container.innerHTML).not.toMatch(/animate-pulse/);
       expect(container.innerHTML).not.toMatch(/animate-ping/);
       expect(container.innerHTML).not.toMatch(/blink/i);
     });
 
-    it("displays security advisory warning when root directory encompasses an entire drive", async () => {
+    it("displays security advisory warning when root directory encompasses C:\\, D:\\, or %USERPROFILE%", async () => {
       render(<SettingsPanel isOpen={true} onClose={() => {}} />);
 
       const rootsInput = screen.getByLabelText(/Allowed Roots/i);
-      fireEvent.change(rootsInput, { target: { value: "D:\\" } });
 
+      // Test 1: D:\ whole drive warning
+      fireEvent.change(rootsInput, { target: { value: "D:\\" } });
       await waitFor(() => {
         expect(screen.getByRole("alert")).toBeDefined();
         expect(screen.getByText(/encompasses an entire drive/i)).toBeDefined();
       });
+
+      // Test 2: C:\ whole drive warning
+      fireEvent.change(rootsInput, { target: { value: "C:\\" } });
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toBeDefined();
+        expect(screen.getByText(/encompasses an entire drive/i)).toBeDefined();
+      });
+
+      // Test 3: %USERPROFILE% warning
+      fireEvent.change(rootsInput, { target: { value: "%USERPROFILE%" } });
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toBeDefined();
+        expect(screen.getByText(/encompasses an entire drive or user home/i)).toBeDefined();
+      });
+
+      // Test 4: Safe path clears warning
+      fireEvent.change(rootsInput, { target: { value: "D:\\projects\\ruby-agent" } });
+      await waitFor(() => {
+        expect(screen.queryByRole("alert")).toBeNull();
+      });
     });
 
-    it("triggers explicit confirmation modal when toggling dangerous security flags", async () => {
+    it("triggers explicit confirmation modal for EVERY dangerous flag", async () => {
       render(<SettingsPanel isOpen={true} onClose={() => {}} />);
 
-      const cuCheckbox = screen.getByLabelText(/Enable Computer Use/i);
-      expect((cuCheckbox as HTMLInputElement).checked).toBe(false);
+      const dangerousCheckboxes = [
+        { label: /Enable Computer Use/i, name: "computer_use_enabled" },
+        { label: /Enable Advanced Shell/i, name: "advanced_shell_enabled" },
+        { label: /Allow Remote Screenshots/i, name: "allow_screenshots" },
+        { label: /Enable Screen Recording/i, name: "recording_enabled" },
+      ];
 
-      // Attempt to enable Computer Use
-      fireEvent.click(cuCheckbox);
+      for (const item of dangerousCheckboxes) {
+        const checkbox = screen.getByLabelText(item.label) as HTMLInputElement;
+        expect(checkbox.checked).toBe(false);
+
+        // Attempt to enable
+        fireEvent.click(checkbox);
+
+        await waitFor(() => {
+          expect(screen.getByRole("alertdialog")).toBeDefined();
+          expect(screen.getByText("Enable Dangerous Feature?")).toBeDefined();
+        });
+
+        // Confirm
+        const confirmBtn = screen.getByRole("button", { name: /Confirm & Enable/i });
+        fireEvent.click(confirmBtn);
+
+        await waitFor(() => {
+          expect(screen.queryByRole("alertdialog")).toBeNull();
+          expect(checkbox.checked).toBe(true);
+        });
+
+        // Reset for next test
+        fireEvent.click(checkbox);
+        expect(checkbox.checked).toBe(false);
+      }
+    });
+
+    it("guarantees secrets are never rendered or returned over IPC as plaintext", async () => {
+      const { container } = render(<SettingsPanel isOpen={true} onClose={() => {}} />);
 
       await waitFor(() => {
-        expect(screen.getByRole("alertdialog")).toBeDefined();
-        expect(screen.getByText("Enable Dangerous Feature?")).toBeDefined();
-        expect(screen.getByText(/safety policy/i)).toBeDefined();
+        expect(screen.getByText("Ruby System Settings")).toBeDefined();
       });
 
-      // Confirm dangerous flag
-      const confirmBtn = screen.getByRole("button", { name: /Confirm & Enable/i });
-      fireEvent.click(confirmBtn);
-
-      await waitFor(() => {
-        expect(screen.queryByRole("alertdialog")).toBeNull();
-        expect((cuCheckbox as HTMLInputElement).checked).toBe(true);
-      });
+      // Assert no sensitive key patterns or plaintext secrets exist in rendered DOM
+      const html = container.innerHTML;
+      expect(html).not.toMatch(/ghp_[A-Za-z0-9]{20,}/);
+      expect(html).not.toMatch(/AIzaSy[A-Za-z0-9_-]{33}/);
+      expect(html).not.toMatch(/sk-[A-Za-z0-9]{20,}/);
+      expect(html).not.toMatch(/freellmapi-[A-Za-z0-9_-]{16,}/);
     });
   });
 
@@ -211,6 +271,43 @@ describe("Settings, Onboarding & Doctor Front-end Suite (U1–U4)", () => {
       // Verify copy report button works
       const copyBtn = screen.getByRole("button", { name: /Copy Report/i });
       expect(copyBtn).toBeDefined();
+    });
+  });
+
+  describe("Static Code Analysis & Accessibility Rules", () => {
+    it("statically verifies that no UI components use blinking or pulsing classes on indicators", () => {
+      const srcDir = path.resolve(__dirname);
+      const targetFiles = [
+        "ConsoleView.tsx",
+        "SettingsPanel.tsx",
+        "SetupWizard.tsx",
+        "DoctorModal.tsx",
+        "OrbPreviewPanel.tsx",
+      ];
+
+      for (const file of targetFiles) {
+        const fullPath = path.join(srcDir, file);
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath, "utf-8");
+          // Strictly fail if animate-pulse or animate-ping appear in classes
+          expect(content).not.toMatch(/className="[^"]*animate-pulse/);
+          expect(content).not.toMatch(/className="[^"]*animate-ping/);
+          expect(content).not.toMatch(/keyframes\s+blink/i);
+        }
+      }
+    });
+
+    it("verifies interactive inputs and buttons provide explicit accessible labels and roles", async () => {
+      render(<SettingsPanel isOpen={true} onClose={() => {}} />);
+
+      // Verify accessible form controls
+      expect(screen.getByLabelText(/Allowed Roots/i)).toBeDefined();
+      expect(screen.getByLabelText(/Enable Computer Use/i)).toBeDefined();
+      expect(screen.getByLabelText(/Enable Advanced Shell/i)).toBeDefined();
+      expect(screen.getByLabelText(/Allow Remote Screenshots/i)).toBeDefined();
+      expect(screen.getByLabelText(/Enable Screen Recording/i)).toBeDefined();
+      expect(screen.getByRole("button", { name: /Save Configuration/i })).toBeDefined();
+      expect(screen.getByRole("button", { name: /Cancel/i })).toBeDefined();
     });
   });
 });

@@ -71,9 +71,11 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({ isOpen, onClose })
         trimmed === "D:/" ||
         trimmed === "/" ||
         trimmed === "\\" ||
+        trimmed === "%USERPROFILE%" ||
+        trimmed === "%USERPROFILE%\\" ||
         (trimmed.length <= 3 && trimmed.endsWith(":"))
       ) {
-        warn = `Root '${r.trim()}' encompasses an entire drive. Specifying a subfolder like 'D:\\projects' is strongly recommended.`;
+        warn = `Root '${r.trim()}' encompasses an entire drive or user home directory. Specifying a subfolder like 'D:\\projects' is strongly recommended.`;
         break;
       }
     }
