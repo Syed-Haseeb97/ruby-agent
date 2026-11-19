@@ -1163,6 +1163,41 @@ pub fn get_system_metrics(state: State<'_, AppState>) -> ruby_core::SystemMetric
     state.metrics.get_snapshot()
 }
 
+pub fn delete_recordings_core(
+    recorder: &ruby_actions::screen_recorder::ScreenRecorder,
+    conf_mgr: &ruby_policy::UnifiedConfirmationManager,
+    confirmation_code: Option<String>,
+) -> Result<usize, String> {
+    match confirmation_code {
+        Some(code) => {
+            recorder.delete_all_recordings_with_confirmation(&code)
+                .map_err(|e| e.to_string())
+        }
+        None => {
+            let code = conf_mgr.register_action(
+                "recorder",
+                "delete_recordings",
+                serde_json::json!({}),
+                "Delete all desktop screen recordings",
+            );
+            Err(format!(
+                "Delete all recordings requires confirmation. Code: {code}"
+            ))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn delete_recordings(
+    state: State<'_, AppState>,
+    confirmation_code: Option<String>,
+) -> Result<usize, String> {
+    let conf_mgr = state.tool_manager.confirmation_manager();
+    let cfg = ruby_actions::screen_recorder::ScreenRecordingConfig::default();
+    let recorder = ruby_actions::screen_recorder::ScreenRecorder::new(cfg, Arc::clone(&conf_mgr));
+    delete_recordings_core(&recorder, &conf_mgr, confirmation_code)
+}
+
 #[cfg(test)]
 mod voice_live_tests {
     use super::*;
@@ -1506,5 +1541,49 @@ mod voice_live_tests {
         metrics.record_dictation_latency(1500, 100, 200, 50);
         let snap = metrics.get_snapshot();
         assert_eq!(snap.dictation.total_ms, 350);
+    }
+
+    #[test]
+    fn test_console_ipc_delete_recordings_requires_confirmation_then_deletes() {
+        let temp = tempfile::tempdir().unwrap();
+        let rec_dir = temp.path().join("recordings");
+        std::fs::create_dir_all(&rec_dir).unwrap();
+        let f1 = rec_dir.join("rec1.mp4");
+        let f2 = rec_dir.join("rec2.mp4");
+        std::fs::write(&f1, b"segment1").unwrap();
+        std::fs::write(&f2, b"segment2").unwrap();
+
+        let conf_mgr = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
+        let mut cfg = ruby_actions::screen_recorder::ScreenRecordingConfig::default();
+        cfg.output_dir = rec_dir.clone();
+        let recorder = ruby_actions::screen_recorder::ScreenRecorder::new(cfg, Arc::clone(&conf_mgr));
+
+        // 1. Without confirmation code -> returns Err requiring code, files remain
+        let res_no_code = delete_recordings_core(&recorder, &conf_mgr, None);
+        assert!(res_no_code.is_err());
+        let err_msg = res_no_code.unwrap_err();
+        assert!(err_msg.contains("Delete all recordings requires confirmation. Code: "));
+        assert!(f1.exists());
+        assert!(f2.exists());
+
+        let code = err_msg
+            .split("Code: ")
+            .nth(1)
+            .unwrap()
+            .trim();
+        assert_eq!(code.len(), 6);
+
+        // 2. With wrong code -> returns Err, files remain
+        let res_wrong = delete_recordings_core(&recorder, &conf_mgr, Some("999999".to_string()));
+        assert!(res_wrong.is_err());
+        assert!(f1.exists());
+        assert!(f2.exists());
+
+        // 3. With correct code -> succeeds and deletes files
+        let res_correct = delete_recordings_core(&recorder, &conf_mgr, Some(code.to_string()));
+        assert!(res_correct.is_ok());
+        assert_eq!(res_correct.unwrap(), 2);
+        assert!(!f1.exists());
+        assert!(!f2.exists());
     }
 }

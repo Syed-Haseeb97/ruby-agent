@@ -468,6 +468,15 @@ mod tests {
         assert!(!f1.exists());
         assert!(!f2.exists());
         assert!(!f3.exists());
+
+        // Test retention auto-cleanup of expired files
+        let old_f = rec_dir.join("old_rec.mp4");
+        std::fs::write(&old_f, b"old_rec").unwrap();
+        assert!(old_f.exists());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let cleaned = recorder.cleanup_expired_recordings(std::time::Duration::from_millis(10)).unwrap();
+        assert_eq!(cleaned, 1);
+        assert!(!old_f.exists(), "Expired recording past retention window must be automatically deleted");
     }
 
     #[test]

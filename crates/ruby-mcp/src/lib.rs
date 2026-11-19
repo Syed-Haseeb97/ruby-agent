@@ -1268,5 +1268,21 @@ mod tests {
             "Model-visible error string contained a 6-digit code: '{}'",
             model_visible_error
         );
+
+        // 4. Also verify normal tool execution result does not leak the pending code
+        let search_res = manager
+            .execute_tool("memory", "search_memories", serde_json::json!({ "query": "Sensitive", "limit": 5 }))
+            .await
+            .expect("Search memories must succeed");
+        let search_str = search_res.to_string();
+        assert!(
+            !search_str.contains(&active_code),
+            "Search memories output leaked live pending confirmation code: '{}'",
+            search_str
+        );
+
+        // 5. Verify log-formatted strings and memory results do not contain active confirmation codes
+        let sample_log = format!("Executed tool with error: {model_visible_error}");
+        assert!(!sample_log.contains(&active_code));
     }
 }

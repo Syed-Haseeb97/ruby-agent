@@ -246,7 +246,8 @@ pub fn run() {
         commands::get_secrets_status,
         commands::is_first_run,
         commands::get_recent_logs,
-        commands::get_system_metrics
+        commands::get_system_metrics,
+        commands::delete_recordings
     ]);
 
     #[cfg(not(feature = "test-capture"))]
@@ -283,7 +284,8 @@ pub fn run() {
         commands::get_secrets_status,
         commands::is_first_run,
         commands::get_recent_logs,
-        commands::get_system_metrics
+        commands::get_system_metrics,
+        commands::delete_recordings
     ]);
 
     let remote_adapter_bg = Arc::clone(&remote_adapter);
