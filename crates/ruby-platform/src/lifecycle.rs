@@ -386,7 +386,7 @@ mod tests {
         let fake_token = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
         let panic_str = format!("Thread panicked with token {} at line 42", fake_token);
         let dump_path = reporter
-            .write_crash_dump(panic_str, Some("main.rs:42"))
+            .write_crash_dump(&panic_str, Some("main.rs:42"))
             .unwrap();
 
         assert!(dump_path.exists());

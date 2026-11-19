@@ -1,179 +1,84 @@
-# Ruby Assistant — Checkpoint & Milestone Handoff
+# Ruby Assistant — Project Handoff & Developer Guide
 
-**Author**: Ruby Assistant Team  
-**Date**: 2026-11-19  
-**Repository**: `Syed-Haseeb97/ruby-agent`  
-**Current Milestone**: Phase R2 (Part D - Remote Screen Capture & Visual Verification) Completed  
-**Next Milestone**: Production Deployment & Live Mobile Validation
+## 1. Architectural Overview
 
----
-
-## 1. Status Overview
-
-All Part A hardening items, Milestone M4 gaps, Milestone M5 Background Tasks (Mode B Supervisor), and V1 Voice Live hardening have been addressed, implemented, and verified across all subsystems.
-
-### V1 Voice Live Relabeling & Scope Clarification
-- In earlier reports, Voice Live and bidirectional streaming was colloquially referred to alongside M5. Per explicit user direction, the Voice Live work is formally relabeled as **"V1 Voice Live"** and documented in [V1_VOICE_LIVE_ACCEPTANCE.md](file:///D:/projects/ruby-agent/docs/V1_VOICE_LIVE_ACCEPTANCE.md).
-- **Milestone M5** strictly designates the **Background Tasks (Mode B Supervisor)** per Part C of the project plan, featuring `DurableJobStore` (SQLite), `LocalToolBackend` (`GUI_ISOLATION_REQUIRED`, advanced shell disabled by default, environment secret scrubbing), `BackgroundTaskSupervisor` async queue worker, Telegram commands (`/jobs`, `/job`, `/cancel`, `/logs`), and desktop Console UI, documented in [M5_ACCEPTANCE.md](file:///D:/projects/ruby-agent/docs/M5_ACCEPTANCE.md).
-
-### Acting Orb Color Palette
-- **Initial Implementation**: `#d97706` (generic amber)
-- **Proposed Refinement**: Aligned with Ruby's editorial light-mode design tokens using warm bronze amber:
-  - Base colors: `["#86560D", "#B45309"]`
-  - Highlight colors: `["#F6ECD9", "#E8D5B5"]`
-  - Status indicator: `#86560D` on `#F6ECD9`
-- **Status**: `needs Haseeb approval` (explicitly tagged for review before promotion).
+Ruby Assistant is an autonomous, privacy-first desktop AI assistant built in Rust and React/Tauri for Windows. It provides:
+- **Speech Dictation (M1)**: Low-level keyboard hook (`WH_KEYBOARD_LL`), Silero VAD, Parakeet/Whisper neural STT, elevation/UIPI check, transient clipboard injection with history exclusion.
+- **Visual Orb & Moods (M0)**: Slint + Canvas shader orb displaying 9 mood states in strict light mode (`#F5F3EE` warm archival paper, white cards, stone hairlines `#C8C2B5`, zero blinking/pulsing animations).
+- **Computer Use / OS Automation (M4)**: Windows input synthesis, UIA/OCR text inspection, 1200ms Esc emergency kill switch, password field refusal, and sensitive window denylisting.
+- **Policy Engine & Model Gating (`ruby-policy`)**: Classifies all model tool requests (`ReadOnly` -> auto-allowed, `Write`/`Destructive`/`Unknown` -> gated by CSPRNG 6-digit confirmation codes). Untrusted inputs are framed strictly as passive `DATA` blocks.
+- **Background Tasks (M5)**: Durable SQLite queue (`%LOCALAPPDATA%\Ruby\jobs.db`) with retry state machine, concurrency limiting, and restart recovery.
+- **Remote Control (R0â€“R2)**: Long-polling Telegram bot with R0 cryptographically secure pairing, R1 allowed roots file isolation, and R2 full-desktop screenshot protection.
+- **Observability & Diagnostics (Doctor / Logging)**: Structured JSON-lines logger with daily file rotation, 14-day retention pruning, and comprehensive secret scrubbing. CLI and GUI pre-flight diagnostics.
 
 ---
 
-## 2. Milestone M4 Deliverables & Verification Summary
+## 2. Workspace Map & Crate Topology
 
-1. **Kill Switch & Input Release**:
-   - Esc-hold / global cancellation token cancels in-flight reasoning calls and immediately releases all held keys and mouse buttons.
-   - Verified via:
-     - `test_kill_switch_aborts_hanging_model_call`
-     - `test_kill_switch_during_drag_releases_mouse`
-     - `test_kill_switch_during_held_key_releases_key`
-
-2. **Password Guardrails & Browser Verification**:
-   - Win32 `ES_PASSWORD` / `EM_GETPASSWORDCHAR` and UI Automation `CurrentIsPassword` checks run before any `TypeText` action.
-   - Browser targets (`chrome`, `msedge`, `firefox`, `brave`) strictly fail closed if input element cannot be inspected.
-   - Verified via:
-     - `test_password_field_detected_refuses_typing`
-     - `test_unverifiable_field_in_browser_refuses_typing`
-
-3. **Platform Session & Elevation Protections**:
-   - Immediate halt if Windows user session is locked, foreground window is elevated, or secure desktop/UAC is active.
-   - Verified via:
-     - `test_session_locked_stops_agent_loop`
-     - `test_elevated_foreground_or_secure_desktop_stops_agent_loop`
-
-4. **Audit Log Hygiene**:
-   - Never records typed text or screenshot payloads in audit logs or step history.
-   - Verified via:
-     - `test_audit_log_hygiene_never_records_typed_text_or_screenshots`
-
-5. **DPI & Multi-Monitor Geometry**:
-   - Per-monitor DPI awareness and unified coordinate space supporting 100%, 125%, 150%, 200% scaling and negative-origin secondary monitors.
-   - Verified via:
-     - `test_dpi_scaling_100_percent`
-     - `test_dpi_scaling_125_percent`
-     - `test_dpi_scaling_150_percent`
-     - `test_dpi_scaling_200_percent`
-     - `test_multi_monitor_negative_origin_secondary`
-
-6. **Gemini Vision Real Model Path & Third-Party Protection**:
-   - Primary `gemini-3.8-flash` -> fallback `gemini-3-flash-preview` chain.
-   - FreeLLMAPI third-party fallback blocked unless `allow_third_party_fallback = true` AND explicit confirmation that screenshots leave the machine is granted.
-   - Verified via:
-     - `test_third_party_fallback_blocked_without_explicit_confirmation`
-     - `test_third_party_fallback_refused_when_allow_fallback_is_false`
-
-7. **Config Defaults & Telegram Channel Integration**:
-   - `computer_use.enabled = false` and `dry_run = true` defaults.
-   - Telegram `/do` refuses with an explanatory message when disabled.
-   - Consequential action confirmations use shared `UnifiedConfirmationManager` (120s TTL, 5-attempt cap).
-   - Verified via:
-     - `test_computer_use_config_defaults`
-     - `test_telegram_do_refuses_when_computer_use_disabled`
-     - `test_m4_consequential_confirmation_uses_unified_confirmation_manager`
-
-8. **User-Configurable Denylist**:
-   - Matches process name and window title case-insensitively, preserving built-in defaults (`1Password`, `Bitwarden`, `KeePass`, `Chase`, `regedit`, `taskmgr`, etc.).
-   - Verified via:
-     - `test_denylist_matches_process_name_case_insensitive`
-     - `test_denylist_matches_window_title_case_insensitive`
-     - `test_denylist_custom_user_entries_matched`
-     - `test_denylist_preserves_built_in_defaults`
+| Crate | Path | Responsibility |
+| :--- | :--- | :--- |
+| `ruby-config` | `crates/ruby-config/` | Application configuration defaults, disk path resolution (`%LOCALAPPDATA%\Ruby\`). |
+| `ruby-policy` | `crates/ruby-policy/` | File system policy, SSRF/URL validation, tool classification, unified confirmation manager. |
+| `ruby-platform` | `crates/ruby-platform/` | Win32 FFI: keyboard hooks, clipboard injection, elevation check, Job Object process trees, mutex guard. |
+| `ruby-gemini` | `crates/ruby-gemini/` | Gemini API client (2.5/3.0 Flash, Pro, Vision, Live), FreeLLMAPI fallback guard. |
+| `ruby-dictation` | `crates/ruby-dictation/` | Speech-to-text pipeline, VAD, synthetic audio cues, diagnostic CLI. |
+| `ruby-voice` | `crates/ruby-voice/` | Piper TTS engine, Voice Live session manager, wake word trait + disabled stub. |
+| `ruby-actions` | `crates/ruby-actions/` | Allowlisted local actions (file, app, settings, media), screen recorder, Computer Use loop. |
+| `ruby-memory` | `crates/ruby-memory/` | SQLite long-term memory store (`ruby_memory.db`) with FTS5 search and secret scanning. |
+| `ruby-mcp` | `crates/ruby-mcp/` | Model Context Protocol stdio client, 1 MB bounded buffer parser, Playwright browser integration. |
+| `ruby-core` | `crates/ruby-core/` | Background task supervisor, pre-flight doctor diagnostics, structured redacting logger, metrics. |
+| `ruby-remote` | `crates/ruby-remote/` | Telegram remote control channel, pairing manager, power/sleep state watcher. |
+| `ruby-desktop` | `crates/ruby-desktop/` | Tauri v2 desktop application, React frontend, centralized settings, setup wizard. |
 
 ---
 
-## 3. Milestone M5 Deliverables: Background Tasks (Mode B Supervisor)
+## 3. Real vs Mock Implementation Truth
 
-1. **Durable SQLite Queue (`DurableJobStore`)**:
-   - Manages background jobs and log records in SQLite (`background_jobs` and `job_logs`).
-   - Survived app restarts, supports `Queued`, `Running`, `Verifying`, `Completed`, `Failed`, `Cancelled`, `Timeout`.
-   - Verified via:
-     - `test_sqlite_job_store_crud_and_status`
-     - `test_sqlite_job_store_logs`
-
-2. **ExecutionBackend & Safety (`LocalToolBackend`)**:
-   - `GUI_ISOLATION_REQUIRED`: Refuses any interactive GUI/Mode A computer-use attempt by background jobs.
-   - `allow_advanced_shell: false` by default: Blocks shell redirection, subshells, and command chains.
-   - Environment secret scrubbing: Strips `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`.
-   - Verified via:
-     - `test_local_tool_backend_success`
-     - `test_local_tool_backend_gui_isolation_refusal`
-     - `test_local_tool_backend_advanced_shell_disabled_by_default`
-
-3. **Background Supervisor Worker (`BackgroundTaskSupervisor`)**:
-   - Asynchronous worker loop with cancellation tokens and execution timeouts.
-   - Verified via:
-     - `test_background_task_supervisor_lifecycle`
-     - `test_background_task_supervisor_timeout`
-     - `test_background_task_supervisor_cancellation`
-
-4. **Multi-Channel Control (Telegram & Console)**:
-   - Telegram commands `/jobs`, `/job <id>`, `/cancel <id>`, `/logs <id>`.
-   - Desktop Tauri commands (`submit_background_job`, `list_background_jobs`, etc.) and Console UI.
-   - Verified via:
-     - `test_handle_background_command`
-     - `test_telegram_background_job_commands_lifecycle`
-     - Frontend build (`npm run build`)
+| Subsystem | Real Implementation | Mock / Stub Implementation |
+| :--- | :--- | :--- |
+| **Keyboard Hooks** | Real Win32 `SetWindowsHookExW` (`WH_KEYBOARD_LL`) | Trait-abstracted test fakes for unit testing |
+| **Elevation Check** | Real Win32 `GetTokenInformation` with UAC token queries | Mock token provider for simulated non-elevated tests |
+| **Job Object Tree Kill** | Real Win32 Job Object API (`CreateJobObjectW`, `AssignProcessToJobObject`) | Simulated timeout runner in tests |
+| **SQLite Storage** | Real SQLite FTS5 database on disk via `rusqlite` | `open_in_memory()` for isolated unit tests |
+| **Secret Redaction** | Real regex-based multi-pattern scrubber across all S10 secrets | Planted test fixtures for regression verification |
+| **Screen Recorder** | Real FFmpeg process launcher with `-an` audio-off argument | Fake sleeping mock executable verifying tree kill |
+| **Voice Live Audio** | Real bidirectional Gemini Live WebSocket protocol | Mock WebSocket server verifying confirmation gating |
+| **Wake Word** | Trait architecture (`WakeWordDetector`) | `DisabledWakeWordDetector` active by default (Default OFF) |
+| **Telegram Remote** | Real Telegram Bot API HTTP polling client | `MockTelegramServer` with synthetic message loop |
 
 ---
 
-## 4. V1 Voice Live Deliverables
+## 4. How to Build & Run
 
-1. **Bidirectional Streaming Protocol**:
-   - Client and server audio framing, turn completion, rate-limit backoff, and state machines.
-   - Verified via:
-     - `test_mock_level_voice_live_session_lifecycle`
-     - `test_mock_level_rate_limit_backoff`
+### Debug Mode (Development)
+```powershell
+# 1. Install frontend dependencies
+cd crates/ruby-desktop/frontend
+npm install
+npm run build
+cd ../../..
 
-2. **Safety & Policy Gating**:
-   - Tool calls route through `ruby-policy` and `UnifiedConfirmationManager`.
-   - Tool results strictly wrapped in `[DATA_OUTPUT]...[/DATA_OUTPUT]`.
-   - Hard session limit (default 10 min watchdog).
-   - Audio and transcript content never written to logs.
-   - Third-party fallback strictly disabled for live audio.
-   - Verified via:
-     - `test_mock_level_policy_gated_live_tool_dispatcher_data_output_and_confirmation`
-     - `test_mock_level_transcript_prompt_injection_sanitization`
-     - `test_mock_level_live_session_hard_duration_limit`
-     - `test_mock_level_third_party_fallback_refused_for_live_audio`
+# 2. Run diagnostic doctor
+cargo run -p ruby-desktop -- doctor
 
----
+# 3. Launch desktop assistant in debug mode
+cargo run -p ruby-desktop
+```
 
-## 5. Phase R2 Deliverables: Remote Screen Capture & Visual Verification
+### Release Mode (Production)
+```powershell
+cargo build --release -p ruby-desktop
+.\target\release\ruby-desktop.exe
+```
 
-1. **Telegram `/screen` Command & Capture Pipeline**:
-   - On-demand mobile screen capture for paired Telegram devices.
-   - Dispatches in-memory JPEG captures via Telegram's `/sendPhoto` endpoint with automatic fallback to `sendDocument`.
-   - Verified via:
-     - `test_telegram_screen_command_success`
-     - `test_telegram_screen_command_uninitialized`
-     - `test_channel_adapter_send_file_routes_images_to_send_photo`
+### Running Test Suites
+```powershell
+# Run full workspace test suite
+cargo test --workspace
 
-2. **Security & Privacy Guardrails**:
-   - Refuses capture when Windows session is locked (`"❌ Screen capture refused: Windows session is locked."`).
-   - Refuses capture when UAC / secure desktop or elevated window is active (`"❌ Screen capture refused: Secure desktop or elevated process active."`).
-   - Refuses capture when foreground window matches password managers or financial portals (`"❌ Screen capture refused: Foreground window is protected by security denylist."`).
-   - Verified via:
-     - `test_telegram_screen_command_session_locked_refusal`
-     - `test_telegram_screen_command_elevated_or_secure_desktop_refusal`
-     - `test_telegram_screen_command_denylist_refusal`
-     - `test_default_remote_screen_capturer_denylist_and_locks`
+# Run secret scanner across all files
+python acceptance/secret_scan.py --all
 
-3. **In-Memory Streaming & Audit Integrity**:
-   - Screen bytes are held strictly in heap memory (`Vec<u8>`) and never written to disk in the git repository tree (Rule S1).
-   - Append-only security audit log records every capture attempt with sender and refusal reason.
-   - Desktop state in `ruby-desktop` wires `DefaultRemoteScreenCapturer` with `WindowsComputerUseExecutor`, `WindowsPlatformSecurityInspector`, and custom denylist from config.
-
----
-
-## 6. Negative Invariants & Affirmation
-
-- **G3 Invariant**: Zero physical keyboard keystrokes, mouse moves, mouse clicks, screen captures, or clipboard reads/writes were dispatched or observed on physical hardware during automated test suites.
-- All tests executed hermetically using mock executors and memory capture.
-- Live hardware tests remain opt-in under `--features live-input`.
+# Run frontend tests
+cd crates/ruby-desktop/frontend && npm test && cd ../../..
+```
