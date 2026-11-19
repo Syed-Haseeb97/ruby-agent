@@ -285,6 +285,7 @@ pub struct LocalToolBackend {
     allowed_commands: Vec<String>,
     confirmation_mgr: Arc<Mutex<Option<Arc<ruby_policy::UnifiedConfirmationManager>>>>,
     confirmed_code: Arc<Mutex<Option<String>>>,
+    elevation_override: Arc<Mutex<Option<bool>>>,
 }
 
 impl LocalToolBackend {
@@ -307,12 +308,25 @@ impl LocalToolBackend {
             ],
             confirmation_mgr: Arc::new(Mutex::new(None)),
             confirmed_code: Arc::new(Mutex::new(None)),
+            elevation_override: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn with_allowed_commands(mut self, cmds: Vec<String>) -> Self {
         self.allowed_commands = cmds;
         self
+    }
+
+    pub fn with_elevation_override(self, elevated: bool) -> Self {
+        *self.elevation_override.lock().unwrap() = Some(elevated);
+        self
+    }
+
+    pub fn is_elevated(&self) -> bool {
+        if let Some(forced) = *self.elevation_override.lock().unwrap() {
+            return forced;
+        }
+        ruby_platform::elevation_check::is_current_process_elevated()
     }
 
     pub fn with_confirmation_manager(
@@ -384,36 +398,45 @@ impl LocalToolBackend {
         }
         clean
     }
-}
 
-pub const ADVANCED_SHELL_DENYLIST: &[&str] = &[
-    "regedit.exe",
-    "regedit",
-    "reg.exe",
-    "reg",
-    "format.com",
-    "format",
-    "vssadmin.exe",
-    "vssadmin",
-    "bcdedit.exe",
-    "bcdedit",
-    "diskpart.exe",
-    "diskpart",
-    "net.exe",
-    "net",
-    "attrib.exe",
-    "attrib",
-    "takeown.exe",
-    "takeown",
-    "icacls.exe",
-    "icacls",
-];
+    /// Executes a command within an optional specified working directory (which must reside inside workspace_root).
+    pub async fn execute_command_in_cwd(
+        &self,
+        cmd: &str,
+        args: &[String],
+        cwd: Option<&Path>,
+    ) -> Result<String, CoreError> {
+        let work_dir = if let Some(d) = cwd {
+            if !d.is_absolute() {
+                self.resolve_path(&d.to_string_lossy())?
+            } else {
+                let canonical = d
+                    .canonicalize()
+                    .map_err(|e| CoreError::Execution(format!("Invalid cwd: {e}")))?;
+                let root_canonical = self
+                    .workspace_root
+                    .canonicalize()
+                    .map_err(|e| CoreError::Execution(format!("Invalid root: {e}")))?;
+                if !canonical.starts_with(&root_canonical) {
+                    return Err(CoreError::Execution(
+                        "Path traversal blocked: working directory outside workspace root"
+                            .to_string(),
+                    ));
+                }
+                canonical
+            }
+        } else {
+            self.workspace_root.clone()
+        };
+        self.execute_command_internal(cmd, args, &work_dir).await
+    }
 
-pub const MAX_JOB_OUTPUT_BYTES: usize = 65536; // 64 KB cap
-
-#[async_trait]
-impl ExecutionBackend for LocalToolBackend {
-    async fn execute_command(&self, cmd: &str, args: &[String]) -> Result<String, CoreError> {
+    async fn execute_command_internal(
+        &self,
+        cmd: &str,
+        args: &[String],
+        work_dir: &Path,
+    ) -> Result<String, CoreError> {
         let base_cmd = Path::new(cmd)
             .file_name()
             .and_then(|n| n.to_str())
@@ -477,7 +500,7 @@ impl ExecutionBackend for LocalToolBackend {
             }
 
             // 3. Non-elevated enforcement
-            if ruby_platform::elevation_check::is_current_process_elevated() {
+            if self.is_elevated() {
                 return Err(CoreError::Execution(
                     "Advanced shell execution refused: running under an elevated security token"
                         .to_string(),
@@ -513,7 +536,7 @@ impl ExecutionBackend for LocalToolBackend {
 
         let mut command = tokio::process::Command::new(cmd);
         command.args(args);
-        command.current_dir(&self.workspace_root);
+        command.current_dir(work_dir);
         command.env_clear();
         command.envs(&clean_env);
         command.stdout(std::process::Stdio::piped());
@@ -558,6 +581,38 @@ impl ExecutionBackend for LocalToolBackend {
                 output.status, stdout, stderr
             )))
         }
+    }
+}
+
+pub const ADVANCED_SHELL_DENYLIST: &[&str] = &[
+    "regedit.exe",
+    "regedit",
+    "reg.exe",
+    "reg",
+    "format.com",
+    "format",
+    "vssadmin.exe",
+    "vssadmin",
+    "bcdedit.exe",
+    "bcdedit",
+    "diskpart.exe",
+    "diskpart",
+    "net.exe",
+    "net",
+    "attrib.exe",
+    "attrib",
+    "takeown.exe",
+    "takeown",
+    "icacls.exe",
+    "icacls",
+];
+
+pub const MAX_JOB_OUTPUT_BYTES: usize = 65536; // 64 KB cap
+
+#[async_trait]
+impl ExecutionBackend for LocalToolBackend {
+    async fn execute_command(&self, cmd: &str, args: &[String]) -> Result<String, CoreError> {
+        self.execute_command_in_cwd(cmd, args, None).await
     }
 
     async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), CoreError> {
@@ -767,6 +822,24 @@ impl BackgroundTaskSupervisor {
             "Cancellation requested by operator (process tree terminated)",
         );
         Ok(())
+    }
+
+    /// Cancels all currently running background tasks and terminates their process trees.
+    pub fn cancel_all_active(&self) -> usize {
+        let mut count = 0;
+        let tokens: Vec<Uuid> = self
+            .active_cancel_tokens
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        for id in tokens {
+            if self.cancel(id).is_ok() {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn get_job(&self, id: Uuid) -> Result<Option<BackgroundTask>, CoreError> {
@@ -1091,5 +1164,120 @@ mod tests {
 
         assert_eq!(t1.status, TaskStatus::Queued);
         assert_eq!(t2.status, TaskStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn test_m5_1_argv_only_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = LocalToolBackend::new(temp.path().to_path_buf(), true);
+
+        // 1. Rejection of /c or -Command
+        let res_cmd = backend
+            .execute_command("cmd.exe", &["/c".into(), "echo hi".into()])
+            .await;
+        assert!(res_cmd.is_err());
+        assert!(res_cmd
+            .unwrap_err()
+            .to_string()
+            .contains("Arbitrary shell string evaluation"));
+
+        let res_ps = backend
+            .execute_command("powershell.exe", &["-Command".into(), "Get-Process".into()])
+            .await;
+        assert!(res_ps.is_err());
+        assert!(res_ps
+            .unwrap_err()
+            .to_string()
+            .contains("Arbitrary shell string evaluation"));
+
+        // 2. Rejection of piping / chaining operators
+        let res_pipe = backend
+            .execute_command("echo", &["hello | cat".into()])
+            .await;
+        assert!(res_pipe.is_err());
+        assert!(res_pipe
+            .unwrap_err()
+            .to_string()
+            .contains("Shell piping, redirection, and chaining syntax is strictly prohibited"));
+
+        let res_chain = backend.execute_command("echo", &["hello; ls".into()]).await;
+        assert!(res_chain.is_err());
+        assert!(res_chain
+            .unwrap_err()
+            .to_string()
+            .contains("Shell piping, redirection, and chaining syntax is strictly prohibited"));
+    }
+
+    #[tokio::test]
+    async fn test_m5_1_denylist_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = LocalToolBackend::new(temp.path().to_path_buf(), true);
+
+        let res_reg = backend.execute_command("reg.exe", &["query".into()]).await;
+        assert!(res_reg.is_err());
+        assert!(res_reg
+            .unwrap_err()
+            .to_string()
+            .contains("is blocked by advanced shell security denylist"));
+
+        let res_format = backend.execute_command("format.com", &["D:".into()]).await;
+        assert!(res_format.is_err());
+        assert!(res_format
+            .unwrap_err()
+            .to_string()
+            .contains("is blocked by advanced shell security denylist"));
+    }
+
+    #[tokio::test]
+    async fn test_m5_1_output_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = LocalToolBackend::new(temp.path().to_path_buf(), true);
+
+        // Run python to generate 100,000 bytes
+        let res = backend
+            .execute_command("python", &["-c".into(), "print('X' * 100000)".into()])
+            .await;
+        if let Ok(out) = res {
+            assert!(
+                out.len() <= MAX_JOB_OUTPUT_BYTES,
+                "Output must be capped at {} bytes, got {}",
+                MAX_JOB_OUTPUT_BYTES,
+                out.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_m5_1_cwd_outside_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = LocalToolBackend::new(temp.path().to_path_buf(), true);
+
+        // Attempt execution with cwd outside workspace
+        let res = backend
+            .execute_command_in_cwd("echo", &["test".into()], Some(Path::new("../..")))
+            .await;
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("Path traversal blocked"),
+            "Expected path traversal blocked, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_m5_1_elevated_refusal() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend =
+            LocalToolBackend::new(temp.path().to_path_buf(), true).with_elevation_override(true);
+
+        let res = backend.execute_command("echo", &["hello".into()]).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "Advanced shell execution refused: running under an elevated security token"
+            ),
+            "Expected elevated refusal, got: {err}"
+        );
     }
 }

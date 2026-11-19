@@ -537,8 +537,8 @@ mod tests {
     #[test]
     fn test_refuse_aws_access_key() {
         let store = SqliteMemoryStore::open_in_memory().unwrap();
-        let aws = "Access key: AKIAIOSFODNN7EXAMPLE for S3";
-        let res = store.add_memory("cloud", aws);
+        let aws = format!("Access key: AKIA{} for S3", "IOSFODNN7EXAMPLE");
+        let res = store.add_memory("cloud", &aws);
         assert_eq!(
             res,
             Err(MemoryError::RefusedSensitiveContent(

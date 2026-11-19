@@ -195,11 +195,11 @@ pub fn run() {
         tts_playback,
         tool_manager,
         memory_store,
-        computer_use_kill_switch,
+        computer_use_kill_switch: Arc::clone(&computer_use_kill_switch),
         computer_use_audit,
-        computer_use_active_goal,
-        voice_live_manager,
-        bg_supervisor,
+        computer_use_active_goal: Arc::clone(&computer_use_active_goal),
+        voice_live_manager: Arc::clone(&voice_live_manager),
+        bg_supervisor: Arc::clone(&bg_supervisor),
     });
 
     #[cfg(feature = "test-capture")]
@@ -293,8 +293,15 @@ pub fn run() {
         });
     }
 
+    let cu_kill_switch_setup = Arc::clone(&computer_use_kill_switch);
+    let cu_active_goal_setup = Arc::clone(&computer_use_active_goal);
+    let vl_manager_setup = Arc::clone(&voice_live_manager);
+    let bg_supervisor_setup = Arc::clone(&bg_supervisor);
+    let seq_counter_setup = Arc::clone(&seq_counter_ref);
+    let orb_state_setup = Arc::clone(&orb_state_ref);
+
     builder
-        .setup(|app| {
+        .setup(move |app| {
             if let Some(orb_win) = app.get_webview_window("orb") {
                 configure_orb_window_win32(&orb_win.as_ref().window());
             }
@@ -308,6 +315,11 @@ pub fn run() {
             }
 
             let app_handle = app.handle().clone();
+            let cu_kill_switch = Arc::clone(&cu_kill_switch_setup);
+            let cu_active_goal = Arc::clone(&cu_active_goal_setup);
+            let vl_manager = Arc::clone(&vl_manager_setup);
+            let bg_supervisor_thread = Arc::clone(&bg_supervisor_setup);
+
             std::thread::spawn(move || {
                 let kill_switch = Arc::new(AtomicBool::new(false));
                 let desktop_controller = Box::new(WindowsDesktopController::new(Arc::clone(&kill_switch)));
@@ -328,8 +340,8 @@ pub fn run() {
                             "Error" => OperationalState::Error,
                             _ => OperationalState::Idle,
                         };
-                        let seq = seq_counter_ref.fetch_add(1, Ordering::SeqCst) + 1;
-                        let mut orb = orb_state_ref.lock().unwrap();
+                        let seq = seq_counter_setup.fetch_add(1, Ordering::SeqCst) + 1;
+                        let mut orb = orb_state_setup.lock().unwrap();
                         orb.operational = op;
                         let payload = SequencedOrbEvent { seq, state: *orb };
                         let _ = app_handle_cb.emit("orb_state_changed", payload);
@@ -410,14 +422,38 @@ pub fn run() {
                                     }
                                 }
                                 HotKeyAction::Cancelled => {
-                                    dictation_engine.cancel().await;
+                                    let cu_active = cu_active_goal.lock().unwrap().is_some();
+                                    let action = commands::dispatch_esc_hierarchy(
+                                        cu_active,
+                                        &cu_kill_switch,
+                                        &vl_manager,
+                                        dictation_engine.cancel(),
+                                    )
+                                    .await;
+                                    if action == commands::EscHierarchyAction::ModeAKillSwitch {
+                                        *cu_active_goal.lock().unwrap() = None;
+                                        let _ = app_handle.emit(
+                                            "computer_use_stopped",
+                                            serde_json::json!({ "reason": "esc_kill_switch" }),
+                                        );
+                                    }
                                 }
                                 HotKeyAction::AbortedThirdKey { .. } => {
                                     dictation_engine.cancel().await;
                                 }
                                 HotKeyAction::KillSwitchTriggered => {
                                     kill_switch.store(true, Ordering::SeqCst);
+                                    cu_kill_switch.cancel();
+                                    *cu_active_goal.lock().unwrap() = None;
+                                    let _ = vl_manager.stop().await;
                                     dictation_engine.cancel().await;
+                                    let _ = bg_supervisor_thread.cancel_all_active();
+                                    #[cfg(windows)]
+                                    {
+                                        use ruby_actions::computer_use::ComputerUseExecutor;
+                                        let exec = ruby_actions::computer_use::WindowsComputerUseExecutor::new(false);
+                                        let _ = exec.release_all_held_inputs().await;
+                                    }
                                     std::process::exit(0);
                                 }
                             }

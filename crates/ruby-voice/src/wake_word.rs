@@ -1,4 +1,4 @@
-//! Wake word detection abstraction (Phase M6 / F3).
+//! Wake word detection: trait + disabled stub (Phase M6 / F3).
 //! Default implementation is disabled (`DisabledWakeWordDetector`) to ensure
 //! zero unauthorized background audio processing or listening.
 

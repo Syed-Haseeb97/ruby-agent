@@ -17,7 +17,7 @@ The original Python Ruby codebase implemented 16 major functional features ("F-f
 | **F4** | **LLM Chat & Orchestration** | Ollama / Gemini API Python SDK | **Ported (M3)**<br>`ruby-gemini` + chat session | Medium (prompt injection) | Completed (M3 with passive DATA blocks) |
 | **F5** | **Screen Recording** | FFmpeg CLI subprocess recording desktop | **Implementing (M6/F3)**<br>Explicit confirmation, auto-pause | High (privacy/secret leak) | **Phase 1 Priority** (Video-only, denylist auto-pause) |
 | **F6** | **Computer Use / OS Automation**| PyAutoGUI + win32gui | **Ported (M4)**<br>SendInput + UIA + kill switch | Critical (remote execution) | Completed (M4 with kill switch, password guard, denylist) |
-| **F7** | **Wake Word Detection** | openWakeWord / Porcupine Python | **Implementing (M6/F3)**<br>Trait-based, default OFF | Medium (audio eavesdropping) | **Phase 1 Priority** (Trait abstraction, disabled by default) |
+| **F7** | **Wake Word Detection** | openWakeWord / Porcupine Python | **Trait + disabled stub (M6/F3)**<br>Default OFF | Medium (audio eavesdropping) | **Phase 1 Priority** (Trait + disabled stub, disabled by default) |
 | **F8** | **Remote Control (Telegram)** | `python-telegram-bot` polling | **Ported (R1/R2)**<br>`ruby-remote` + pairing + CSPRNG | High (external commands) | Completed (R1/R2 with pairing & confirmation) |
 | **F9** | **MCP Client Extensibility** | Python `mcp` stdio client | **Ported (M3/F4)**<br>`ruby-mcp` + 1MB bounded read | High (untrusted servers) | Completed (M3/F4 with crash isolation & line caps) |
 | **F10** | **Long-term Memory** | SQLite + raw table queries | **Ported (M3)**<br>`ruby-memory` + sqlite + secret scan | High (credential retention) | Completed (M3 with secret rejection) |
@@ -32,9 +32,9 @@ The original Python Ruby codebase implemented 16 major functional features ("F-f
 
 ## 2. Safety Architecture for M6 Deliverables
 
-### A. Wake Word Detection (F7)
+### A. Wake Word Detection (F7: Trait + Disabled Stub)
 - **Trait-Based Architecture**: Behind `WakeWordDetector` trait in `ruby-voice`.
-- **Default State**: `DisabledWakeWordDetector` is active by default. Wake word engine never runs or captures audio without explicit configuration opt-in.
+- **Default State**: `DisabledWakeWordDetector` (disabled stub) is active by default. Wake word engine never runs or captures audio without explicit configuration opt-in.
 - **Fail-Closed**: Microphone stream is never held open silently in the background.
 
 ### B. Video Screen Recording (F5)

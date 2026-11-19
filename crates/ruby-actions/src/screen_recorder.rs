@@ -37,6 +37,7 @@ pub struct ScreenRecordingConfig {
     pub output_dir: PathBuf,
     pub framerate: u32,
     pub denylist: Vec<String>,
+    pub ffmpeg_binary: PathBuf,
 }
 
 impl Default for ScreenRecordingConfig {
@@ -56,6 +57,7 @@ impl Default for ScreenRecordingConfig {
             output_dir: base_dir.join("recordings"),
             framerate: 30,
             denylist: Vec::new(),
+            ffmpeg_binary: PathBuf::from("ffmpeg"),
         }
     }
 }
@@ -69,6 +71,7 @@ pub struct ScreenRecorder {
     active_output_file: Arc<Mutex<Option<PathBuf>>>,
     confirmations: Arc<UnifiedConfirmationManager>,
     visible_windows_override: Arc<Mutex<Option<WindowList>>>,
+    child_process: Arc<Mutex<Option<std::process::Child>>>,
 }
 
 impl ScreenRecorder {
@@ -83,6 +86,7 @@ impl ScreenRecorder {
             active_output_file: Arc::new(Mutex::new(None)),
             confirmations,
             visible_windows_override: Arc::new(Mutex::new(None)),
+            child_process: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -154,14 +158,30 @@ impl ScreenRecorder {
         let filename = format!("recording_{}.mp4", Utc::now().format("%Y%m%d_%H%M%S"));
         let output_path = self.config.output_dir.join(filename);
 
+        // 3. Launch ffmpeg process
+        let ffmpeg_args = Self::build_ffmpeg_args(self.config.framerate, &output_path);
+        let mut cmd = std::process::Command::new(&self.config.ffmpeg_binary);
+        cmd.args(&ffmpeg_args);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        let child = cmd
+            .spawn()
+            .map_err(|e| RecordingError::Failed(e.to_string()))?;
+        *self.child_process.lock().unwrap() = Some(child);
+
         *self.active_output_file.lock().unwrap() = Some(output_path.clone());
         *self.state.lock().unwrap() = RecordingState::Recording;
 
         Ok(output_path)
     }
 
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_process.lock().unwrap().as_ref().map(|c| c.id())
+    }
+
     /// Periodic safety heartbeat: checks if any denylisted window became visible.
-    /// Pauses recording immediately if detected.
+    /// Pauses recording immediately if detected and kills active ffmpeg process.
     pub fn check_security_denylist_tick(&self) -> Result<(), RecordingError> {
         if *self.state.lock().unwrap() != RecordingState::Recording {
             return Ok(());
@@ -171,6 +191,10 @@ impl ScreenRecorder {
         for (title, proc_name) in visible {
             if is_window_denylisted_with_custom(&title, &proc_name, &self.config.denylist) {
                 *self.state.lock().unwrap() = RecordingState::PausedByDenylist;
+                if let Some(mut child) = self.child_process.lock().unwrap().take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 return Err(RecordingError::DenylistedWindowVisible(title));
             }
         }
@@ -178,10 +202,15 @@ impl ScreenRecorder {
         Ok(())
     }
 
-    /// Stops the active recording session.
+    /// Stops the active recording session and terminates ffmpeg process.
     pub fn stop(&self) -> Result<Option<PathBuf>, RecordingError> {
         let prev = *self.state.lock().unwrap();
         *self.state.lock().unwrap() = RecordingState::Stopped;
+
+        if let Some(mut child) = self.child_process.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
 
         let path = self.active_output_file.lock().unwrap().take();
         if prev == RecordingState::Recording || prev == RecordingState::PausedByDenylist {
@@ -210,10 +239,14 @@ mod tests {
     #[test]
     fn test_screen_recording_confirmation_flow_and_denylist_guard() {
         let temp = tempdir().unwrap();
+        let fake_bin = temp.path().join("fake_ffmpeg.bat");
+        std::fs::write(&fake_bin, "@echo off\r\nping 127.0.0.1 -n 30 >nul\r\n").unwrap();
+
         let config = ScreenRecordingConfig {
             output_dir: temp.path().join("recordings"),
             framerate: 30,
             denylist: vec!["CustomBank".into()],
+            ffmpeg_binary: fake_bin,
         };
 
         let confirmations = Arc::new(UnifiedConfirmationManager::new());
@@ -249,8 +282,12 @@ mod tests {
         let output_path = recorder.start_with_confirmation(&code2).unwrap();
         assert_eq!(recorder.state(), RecordingState::Recording);
         assert!(output_path.to_string_lossy().contains("recordings"));
+        assert!(
+            recorder.child_pid().is_some(),
+            "Child ffmpeg process must be active"
+        );
 
-        // 5. Periodic tick catches new denylisted window (CustomBank) and auto-pauses
+        // 5. Periodic tick catches new denylisted window (CustomBank) and auto-pauses + terminates child
         recorder.set_visible_windows_override(vec![
             ("Visual Studio Code".into(), "code.exe".into()),
             ("CustomBank Online Portal".into(), "custombank.exe".into()),
@@ -258,10 +295,43 @@ mod tests {
         let tick_res = recorder.check_security_denylist_tick();
         assert!(tick_res.is_err());
         assert_eq!(recorder.state(), RecordingState::PausedByDenylist);
+        assert!(
+            recorder.child_pid().is_none(),
+            "Child process must be killed on denylist hit"
+        );
 
         // 6. Stop finalizes session
         let stopped_path = recorder.stop().unwrap();
         assert_eq!(stopped_path, Some(output_path));
         assert_eq!(recorder.state(), RecordingState::Stopped);
+    }
+
+    #[test]
+    fn test_screen_recorder_with_fake_ffmpeg_binary_killed_on_stop() {
+        let temp = tempdir().unwrap();
+        let fake_bin = temp.path().join("fake_ffmpeg2.bat");
+        std::fs::write(&fake_bin, "@echo off\r\nping 127.0.0.1 -n 30 >nul\r\n").unwrap();
+
+        let config = ScreenRecordingConfig {
+            output_dir: temp.path().join("recordings"),
+            framerate: 30,
+            denylist: vec![],
+            ffmpeg_binary: fake_bin,
+        };
+
+        let confirmations = Arc::new(UnifiedConfirmationManager::new());
+        let recorder = ScreenRecorder::new(config, confirmations);
+
+        let code = recorder.request_start();
+        recorder.set_visible_windows_override(vec![("Editor".into(), "editor.exe".into())]);
+        let output_path = recorder.start_with_confirmation(&code).unwrap();
+        assert_eq!(recorder.state(), RecordingState::Recording);
+        assert!(recorder.child_pid().is_some());
+
+        // Stop terminates child process
+        let res = recorder.stop().unwrap();
+        assert_eq!(res, Some(output_path));
+        assert_eq!(recorder.state(), RecordingState::Stopped);
+        assert!(recorder.child_pid().is_none());
     }
 }

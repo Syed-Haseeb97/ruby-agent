@@ -524,21 +524,17 @@ pub fn search_memories(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn delete_memory(
-    state: State<'_, AppState>,
+pub fn delete_memory_core(
+    memory_store: &dyn ruby_memory::MemoryStore,
+    conf_mgr: &ruby_policy::UnifiedConfirmationManager,
     id: i64,
     confirmation_code: Option<String>,
 ) -> Result<String, String> {
-    let conf_mgr = state.tool_manager.confirmation_manager();
     if let Some(code) = confirmation_code {
         conf_mgr
             .verify_and_consume(&code)
             .map_err(|e| format!("Confirmation failed: {e}"))?;
-        state
-            .memory_store
-            .delete_memory(id)
-            .map_err(|e| e.to_string())?;
+        memory_store.delete_memory(id).map_err(|e| e.to_string())?;
         Ok(format!("Memory record [ID: {id}] deleted."))
     } else {
         let desc = format!("Delete memory record [ID: {id}]");
@@ -554,14 +550,12 @@ pub fn delete_memory(
     }
 }
 
-#[tauri::command]
-pub fn wipe_all_memories(
-    state: State<'_, AppState>,
+pub fn wipe_all_memories_core(
+    memory_store: &dyn ruby_memory::MemoryStore,
+    conf_mgr: &ruby_policy::UnifiedConfirmationManager,
     confirmation_code: Option<String>,
 ) -> Result<String, String> {
-    let conf_mgr = state.tool_manager.confirmation_manager();
-    let count = state
-        .memory_store
+    let count = memory_store
         .search_memories("", 1000)
         .map(|m| m.len())
         .unwrap_or(0);
@@ -569,7 +563,7 @@ pub fn wipe_all_memories(
         conf_mgr
             .verify_and_consume(&code)
             .map_err(|e| format!("Confirmation failed: {e}"))?;
-        let wiped = state.memory_store.wipe_all().map_err(|e| e.to_string())?;
+        let wiped = memory_store.wipe_all().map_err(|e| e.to_string())?;
         Ok(format!("All memories wiped (total {wiped} records)."))
     } else {
         let desc = format!("Wipe all memories (total {count} records)");
@@ -583,6 +577,25 @@ pub fn wipe_all_memories(
             "Requires confirmation: {desc}. Reply with code {code} to confirm."
         ))
     }
+}
+
+#[tauri::command]
+pub fn delete_memory(
+    state: State<'_, AppState>,
+    id: i64,
+    confirmation_code: Option<String>,
+) -> Result<String, String> {
+    let conf_mgr = state.tool_manager.confirmation_manager();
+    delete_memory_core(&*state.memory_store, &conf_mgr, id, confirmation_code)
+}
+
+#[tauri::command]
+pub fn wipe_all_memories(
+    state: State<'_, AppState>,
+    confirmation_code: Option<String>,
+) -> Result<String, String> {
+    let conf_mgr = state.tool_manager.confirmation_manager();
+    wipe_all_memories_core(&*state.memory_store, &conf_mgr, confirmation_code)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -676,6 +689,19 @@ pub fn get_computer_use_status(state: State<'_, AppState>) -> Result<ComputerUse
 #[tauri::command]
 pub fn save_orb_snapshot(name: String, base64_png: String) -> Result<String, String> {
     use base64::Engine;
+
+    // Strict name validation to prevent path traversal or filesystem tampering
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid snapshot name '{}': must be strictly alphanumeric with underscores or hyphens",
+            name
+        ));
+    }
+
     let clean = if let Some(idx) = base64_png.find("base64,") {
         &base64_png[idx + 7..]
     } else {
@@ -685,11 +711,47 @@ pub fn save_orb_snapshot(name: String, base64_png: String) -> Result<String, Str
         .decode(clean.trim())
         .map_err(|e| e.to_string())?;
 
-    let out_dir = std::path::PathBuf::from(r"D:\projects\ruby-agent\acceptance\tauri_rendered");
+    // Safe dynamic path outside the repo confined to Ruby's screenshots directory
+    let paths = ruby_config::RubyPaths::resolve();
+    let out_dir = paths.screenshots_dir.join("snapshots");
     let _ = std::fs::create_dir_all(&out_dir);
     let target = out_dir.join(format!("{}.png", name));
     std::fs::write(&target, bytes).map_err(|e| e.to_string())?;
     Ok(target.to_string_lossy().to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum EscHierarchyAction {
+    ModeAKillSwitch,
+    VoiceLiveStop,
+    DictationCancel,
+}
+
+/// Dispatches an Esc keypress according to the strict priority hierarchy:
+/// Priority 1: Mode A Computer Use task cancellation
+/// Priority 2: Voice Live session termination
+/// Priority 3: Dictation buffer cancellation
+pub async fn dispatch_esc_hierarchy<F>(
+    cu_is_active: bool,
+    cu_kill_switch: &ruby_actions::computer_use::KillSwitchToken,
+    voice_live_manager: &ruby_core::voice_live::VoiceLiveManager,
+    cancel_dictation: F,
+) -> EscHierarchyAction
+where
+    F: std::future::Future<Output = ()>,
+{
+    if cu_is_active {
+        cu_kill_switch.cancel();
+        EscHierarchyAction::ModeAKillSwitch
+    } else if voice_live_manager.status() == ruby_core::voice_live::VoiceLiveStatus::Active
+        || voice_live_manager.status() == ruby_core::voice_live::VoiceLiveStatus::Connecting
+    {
+        voice_live_manager.stop().await;
+        EscHierarchyAction::VoiceLiveStop
+    } else {
+        cancel_dictation.await;
+        EscHierarchyAction::DictationCancel
+    }
 }
 
 /// Checks if served backend is FreeLLMAPI and formats user notification text.
@@ -969,6 +1031,7 @@ pub fn get_background_job_logs(
 
 #[cfg(test)]
 mod voice_live_tests {
+    use super::*;
     use ruby_core::voice_live::{
         MockToolDispatcher, NullAudioOutput, VoiceLiveManager, VoiceLiveStatus,
     };
@@ -1060,5 +1123,120 @@ mod voice_live_tests {
             VoiceLiveStatus::Stopping => "stopping",
         };
         assert_eq!(status_str, "idle");
+    }
+
+    #[test]
+    fn test_console_ipc_delete_memory_requires_confirmation_then_deletes() {
+        use ruby_memory::{MemoryStore, SqliteMemoryStore};
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        let id = store.add_memory("fact", "User prefers dark mode").unwrap();
+        let conf_mgr = ruby_policy::UnifiedConfirmationManager::new();
+
+        // 1. Unconfirmed request
+        let res_unconfirmed = delete_memory_core(&store, &conf_mgr, id, None);
+        assert!(res_unconfirmed.is_err());
+        let err_msg = res_unconfirmed.unwrap_err();
+        assert!(err_msg.contains("Requires confirmation: Delete memory record"));
+        assert!(err_msg.contains("Reply with code"));
+
+        let code = err_msg
+            .split("Reply with code ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("Must extract code");
+
+        // 2. Confirmed request
+        let res_confirmed = delete_memory_core(&store, &conf_mgr, id, Some(code.to_string()));
+        assert!(res_confirmed.is_ok());
+        assert_eq!(
+            res_confirmed.unwrap(),
+            format!("Memory record [ID: {id}] deleted.")
+        );
+
+        // Verify deleted from store
+        let search = store.search_memories("", 10).unwrap();
+        assert_eq!(search.len(), 0);
+    }
+
+    #[test]
+    fn test_console_ipc_wipe_all_memories_shows_count_requires_confirmation_then_wipes() {
+        use ruby_memory::{MemoryStore, SqliteMemoryStore};
+        let store = SqliteMemoryStore::open_in_memory().unwrap();
+        store.add_memory("fact", "Memory 1").unwrap();
+        store.add_memory("fact", "Memory 2").unwrap();
+        store.add_memory("fact", "Memory 3").unwrap();
+        let conf_mgr = ruby_policy::UnifiedConfirmationManager::new();
+
+        // 1. Unconfirmed request shows total 3 records in prompt
+        let res_unconfirmed = wipe_all_memories_core(&store, &conf_mgr, None);
+        assert!(res_unconfirmed.is_err());
+        let err_msg = res_unconfirmed.unwrap_err();
+        assert!(
+            err_msg.contains("Wipe all memories (total 3 records)"),
+            "Expected 'Wipe all memories (total 3 records)' in error, got: {err_msg}"
+        );
+
+        let code = err_msg
+            .split("Reply with code ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("Must extract code");
+
+        // 2. Confirmed request
+        let res_confirmed = wipe_all_memories_core(&store, &conf_mgr, Some(code.to_string()));
+        assert!(res_confirmed.is_ok());
+        assert_eq!(
+            res_confirmed.unwrap(),
+            "All memories wiped (total 3 records)."
+        );
+
+        let search = store.search_memories("", 10).unwrap();
+        assert_eq!(search.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_esc_hierarchy_dispatch_mode_a_then_voice_then_dictation() {
+        let cu_token = ruby_actions::computer_use::KillSwitchToken::new();
+        let voice_mgr = VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        );
+        let dictation_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Case 1: Mode A Computer Use is active -> priority 1 cancels Mode A
+        let action1 = dispatch_esc_hierarchy(true, &cu_token, &voice_mgr, {
+            let d = Arc::clone(&dictation_cancelled);
+            async move {
+                d.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+        .await;
+        assert_eq!(action1, EscHierarchyAction::ModeAKillSwitch);
+        assert!(cu_token.is_cancelled());
+        assert!(!dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Case 2: Voice Live active -> priority 2 stops Voice Live
+        let h = MockLiveSession::open(LiveSessionConfig::default());
+        voice_mgr.start_with_handle(h).await.unwrap();
+        let action2 = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, {
+            let d = Arc::clone(&dictation_cancelled);
+            async move {
+                d.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+        .await;
+        assert_eq!(action2, EscHierarchyAction::VoiceLiveStop);
+
+        // Case 3: Neither active -> priority 3 cancels Dictation
+        let action3 = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, {
+            let d = Arc::clone(&dictation_cancelled);
+            async move {
+                d.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        })
+        .await;
+        assert_eq!(action3, EscHierarchyAction::DictationCancel);
+        assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

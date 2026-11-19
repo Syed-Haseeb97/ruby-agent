@@ -490,6 +490,78 @@ async fn test_stop_cancels_all_active_tasks() {
         .contains("Cancelled 1 active task")));
 }
 
+// 5b. /stop immediately stops active Voice Live session
+#[tokio::test]
+async fn test_telegram_stop_command_stops_voice_live_manager() {
+    let mock = MockTelegramServer::start().await;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let audit_file = temp_dir.path().join("audit.log");
+
+    let client = Arc::new(TelegramClient::with_base_url(
+        "MOCK_BOT_TOKEN".to_string(),
+        mock.base_url.clone(),
+    ));
+    let config = Arc::new(Mutex::new(RemoteConfig {
+        enabled: true,
+        keep_awake: false,
+        paired_user_id: Some(88888),
+        allowed_roots: vec![],
+        ..Default::default()
+    }));
+
+    let adapter = TelegramAdapter::with_components(
+        client,
+        config,
+        PairingManager::new(),
+        TaskManager::new(),
+        ConfirmationManager::new(),
+        AuditLogger::new(audit_file),
+    );
+
+    let voice_mgr = Arc::new(ruby_core::voice_live::VoiceLiveManager::new(
+        Arc::new(ruby_core::voice_live::NullAudioOutput),
+        Arc::new(ruby_core::voice_live::MockToolDispatcher::default()),
+        None,
+    ));
+
+    let handle = ruby_gemini::live_session::MockLiveSession::open(
+        ruby_gemini::live_session::LiveSessionConfig::default(),
+    );
+    voice_mgr.start_with_handle(handle).await.unwrap();
+
+    // Verify Active
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        voice_mgr.status(),
+        ruby_core::voice_live::VoiceLiveStatus::Active
+    );
+
+    adapter.set_voice_live_manager(Arc::clone(&voice_mgr));
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let stop_update = serde_json::json!({
+        "update_id": 11,
+        "message": {
+            "message_id": 31,
+            "from": { "id": 88888 },
+            "chat": { "id": 88888, "type": "private" },
+            "date": now_secs,
+            "text": "/stop"
+        }
+    });
+
+    adapter.process_update(stop_update, now_secs).await.unwrap();
+
+    // Verify Idle
+    assert_eq!(
+        voice_mgr.status(),
+        ruby_core::voice_live::VoiceLiveStatus::Idle
+    );
+}
+
 // 6. /yes with wrong/expired code rejected; /no cancels
 #[tokio::test]
 async fn test_confirmation_plumbing() {

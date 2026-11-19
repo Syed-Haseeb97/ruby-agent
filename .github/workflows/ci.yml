@@ -48,6 +48,9 @@ jobs:
           fi
           echo "Private data check passed: zero private files tracked in git."
 
+      - name: Run Secret and Security Scanner
+        run: python acceptance/secret_scan.py --all
+
       - name: Verify Code Formatting
         run: cargo fmt --check
 
