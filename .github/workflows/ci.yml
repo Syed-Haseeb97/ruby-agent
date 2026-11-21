@@ -54,15 +54,22 @@ jobs:
       - name: Run Negative Secret Scanner Verification
         run: python acceptance/test_secret_scanner_negative.py
 
+      - name: Install Audit and Deny Tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
       - name: Security Audit (cargo-audit)
+        shell: pwsh
         run: |
-          cargo install cargo-audit --locked
-          cargo audit
+          $advisoryDb = "$env:USERPROFILE\.cargo\advisory-db"
+          if (!(Test-Path $advisoryDb)) {
+            git clone --depth 1 https://github.com/rustsec/advisory-db.git $advisoryDb
+          }
+          cargo audit --db $advisoryDb
 
       - name: Supply-Chain & License Linter (cargo-deny)
-        run: |
-          cargo install cargo-deny --locked
-          cargo deny check
+        run: cargo deny check
 
       - name: Verify Code Formatting
         run: cargo fmt --check
