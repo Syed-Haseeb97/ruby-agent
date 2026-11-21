@@ -876,7 +876,9 @@ mod tests {
             .unwrap()
             .contains("[DATA_OUTPUT]"));
         // The code was registered with 6 digits in the unified confirmation manager
-        let pending = confirmation_mgr.get_pending_action().expect("pending action");
+        let pending = confirmation_mgr
+            .get_pending_action()
+            .expect("pending action");
         assert_eq!(pending.code.len(), 6);
 
         // 3. Unknown tool -> denied by default

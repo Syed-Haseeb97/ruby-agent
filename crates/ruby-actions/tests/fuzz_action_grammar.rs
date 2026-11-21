@@ -11,7 +11,10 @@ impl SimpleRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
     }
 
@@ -68,12 +71,55 @@ fn test_fuzz_computer_action_parser_robustness() {
     // 3. Generative random UTF-8 and token fuzzing: 5,000 iterations
     let mut rng = SimpleRng::new(0xCAFE_BABE_1337_7331);
     let token_pool = [
-        "{", "}", "[", "]", ":", ",", "\"", "'", "```json", "```", "\n", "\r", "\t", "\0",
-        "action", "click", "double_click", "triple_click", "middle_click", "right_click",
-        "mouse_down", "release_mouse_button", "move_cursor", "type", "key", "wait", "hotkey",
-        "scroll_at", "drag_and_drop_at", "finish", "fail", "x", "y", "text", "combo", "ms",
-        "null", "true", "false", "NaN", "Infinity", "-1", "0", "999999", "1.5",
-        "こんにちは", "🚀", "Русский", "مرحبا",
+        "{",
+        "}",
+        "[",
+        "]",
+        ":",
+        ",",
+        "\"",
+        "'",
+        "```json",
+        "```",
+        "\n",
+        "\r",
+        "\t",
+        "\0",
+        "action",
+        "click",
+        "double_click",
+        "triple_click",
+        "middle_click",
+        "right_click",
+        "mouse_down",
+        "release_mouse_button",
+        "move_cursor",
+        "type",
+        "key",
+        "wait",
+        "hotkey",
+        "scroll_at",
+        "drag_and_drop_at",
+        "finish",
+        "fail",
+        "x",
+        "y",
+        "text",
+        "combo",
+        "ms",
+        "null",
+        "true",
+        "false",
+        "NaN",
+        "Infinity",
+        "-1",
+        "0",
+        "999999",
+        "1.5",
+        "こんにちは",
+        "🚀",
+        "Русский",
+        "مرحبا",
     ];
 
     for _ in 0..5000 {
@@ -111,23 +157,42 @@ fn test_fuzz_local_action_serde_robustness() {
         LocalAction::CloseApp("calc".into()),
         LocalAction::OpenSystemSettings("display".into()),
         LocalAction::ScreenClick { x: 100, y: 200 },
-        LocalAction::SetReminder { seconds: 60, message: "Tea time".into() },
+        LocalAction::SetReminder {
+            seconds: 60,
+            message: "Tea time".into(),
+        },
         LocalAction::SetWindowsStartup { enable: false },
         LocalAction::ListFolder("C:\\Safe".into()),
-        LocalAction::ReadFileHead { path: "D:\\Safe\\log.txt".into(), max_bytes: 1024 },
+        LocalAction::ReadFileHead {
+            path: "D:\\Safe\\log.txt".into(),
+            max_bytes: 1024,
+        },
         LocalAction::FileInfo("D:\\Safe\\test.bin".into()),
-        LocalAction::SendFile { path: "D:\\Safe\\out.pdf".into(), max_bytes: 4096 },
+        LocalAction::SendFile {
+            path: "D:\\Safe\\out.pdf".into(),
+            max_bytes: 4096,
+        },
         LocalAction::GitStatus("D:\\Safe\\repo".into()),
-        LocalAction::GitLog { repo: "D:\\Safe\\repo".into(), limit: 5 },
+        LocalAction::GitLog {
+            repo: "D:\\Safe\\repo".into(),
+            limit: 5,
+        },
         LocalAction::GitDiffStat("D:\\Safe\\repo".into()),
-        LocalAction::GhPrList { repo: Some("owner/repo".into()), limit: 10 },
-        LocalAction::GhIssueList { repo: None, limit: 10 },
+        LocalAction::GhPrList {
+            repo: Some("owner/repo".into()),
+            limit: 10,
+        },
+        LocalAction::GhIssueList {
+            repo: None,
+            limit: 10,
+        },
         LocalAction::MediaControl("play_pause".into()),
     ];
 
     for act in &valid_actions {
         let json = serde_json::to_string(act).expect("serialization must succeed");
-        let deserialized: LocalAction = serde_json::from_str(&json).expect("deserialization must succeed");
+        let deserialized: LocalAction =
+            serde_json::from_str(&json).expect("deserialization must succeed");
         assert_eq!(*act, deserialized);
     }
 }

@@ -170,7 +170,11 @@ pub fn run() {
     ));
     remote_adapter.set_background_supervisor(Arc::clone(&bg_supervisor));
 
-    let log_dir = ruby_paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("logs");
+    let log_dir = ruby_paths
+        .workspace_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("logs");
     let logger = Arc::new(ruby_core::RedactedJsonLogger::new(log_dir));
     let metrics = Arc::new(ruby_core::MetricsCollector::new());
     remote_adapter.set_metrics_collector(Arc::clone(&metrics));

@@ -49,7 +49,10 @@ pub fn parse_ip_or_numeric_host(host: &str) -> Option<IpAddr> {
 
     // 2. Pure integer (decimal or octal IP e.g. 2130706433 or 017700000001 -> 127.0.0.1)
     if clean.chars().all(|c| c.is_ascii_digit()) {
-        if clean.len() > 1 && clean.starts_with('0') && clean.chars().all(|c| ('0'..='7').contains(&c)) {
+        if clean.len() > 1
+            && clean.starts_with('0')
+            && clean.chars().all(|c| ('0'..='7').contains(&c))
+        {
             if let Ok(num) = u32::from_str_radix(&clean[1..], 8) {
                 return Some(IpAddr::V4(Ipv4Addr::from(num)));
             }
@@ -389,7 +392,10 @@ impl SecurityPolicy for DefaultSecurityPolicy {
 
     fn validate_url(&self, url: &url::Url) -> Result<(), PolicyError> {
         if url.scheme() != "http" && url.scheme() != "https" {
-            return Err(PolicyError::SsrfBlocked(format!("Disallowed scheme: {}", url.scheme())));
+            return Err(PolicyError::SsrfBlocked(format!(
+                "Disallowed scheme: {}",
+                url.scheme()
+            )));
         }
         let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
         if host.is_empty() {
@@ -660,7 +666,10 @@ impl ToolSecurityPolicy for DefaultToolSecurityPolicy {
             .map_err(|e| PolicyError::SsrfBlocked(format!("Invalid URL syntax: {e}")))?;
 
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
-            return Err(PolicyError::SsrfBlocked(format!("Disallowed scheme: {}", parsed.scheme())));
+            return Err(PolicyError::SsrfBlocked(format!(
+                "Disallowed scheme: {}",
+                parsed.scheme()
+            )));
         }
 
         // 1. SSRF prevention

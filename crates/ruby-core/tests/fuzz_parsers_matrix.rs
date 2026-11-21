@@ -18,12 +18,19 @@ impl SimpleRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
     }
 
     fn next_bounded(&mut self, bound: u32) -> u32 {
-        if bound == 0 { 0 } else { self.next_u32() % bound }
+        if bound == 0 {
+            0
+        } else {
+            self.next_u32() % bound
+        }
     }
 
     fn generate_corrupted_string(&mut self) -> String {

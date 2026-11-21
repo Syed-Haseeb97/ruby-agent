@@ -42,7 +42,9 @@ impl DoctorReport {
     pub fn add(&mut self, item: DiagnosticItem) {
         if item.status == DiagnosticStatus::Fail {
             self.overall_status = DiagnosticStatus::Fail;
-        } else if item.status == DiagnosticStatus::Warn && self.overall_status != DiagnosticStatus::Fail {
+        } else if item.status == DiagnosticStatus::Warn
+            && self.overall_status != DiagnosticStatus::Fail
+        {
             self.overall_status = DiagnosticStatus::Warn;
         }
         self.items.push(item);
@@ -51,7 +53,10 @@ impl DoctorReport {
     /// Formats the diagnostic report as clean, copyable, redacted Markdown.
     pub fn to_markdown(&self) -> String {
         let mut md = Vec::new();
-        md.push(format!("# Ruby Doctor Diagnostic Report ({})", self.timestamp_rfc3339));
+        md.push(format!(
+            "# Ruby Doctor Diagnostic Report ({})",
+            self.timestamp_rfc3339
+        ));
         md.push(format!("**Overall Status**: {:?}\n", self.overall_status));
         md.push("| Category | Check | Status | Details | Remedy |".to_string());
         md.push("| :--- | :--- | :---: | :--- | :--- |".to_string());
@@ -121,45 +126,99 @@ impl RubyDoctor {
     }
 
     fn check_credentials(report: &mut DoctorReport) {
-        let gemini_key_present = std::env::var("GEMINI_API_KEY").is_ok()
-            || std::env::var("GOOGLE_API_KEY").is_ok();
+        let gemini_key_present =
+            std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok();
         report.add(DiagnosticItem {
             category: "Credentials".into(),
             name: "Gemini API Key".into(),
-            status: if gemini_key_present { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
-            message: if gemini_key_present { "Present in environment / Credential Manager" } else { "Not set; dictation and chat will use fallback or fail" }.into(),
-            remedy: if gemini_key_present { None } else { Some("Configure GEMINI_API_KEY in Console Settings or environment".into()) },
+            status: if gemini_key_present {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
+            message: if gemini_key_present {
+                "Present in environment / Credential Manager"
+            } else {
+                "Not set; dictation and chat will use fallback or fail"
+            }
+            .into(),
+            remedy: if gemini_key_present {
+                None
+            } else {
+                Some("Configure GEMINI_API_KEY in Console Settings or environment".into())
+            },
         });
 
         let elevenlabs_key_present = std::env::var("ELEVENLABS_API_KEY").is_ok();
         report.add(DiagnosticItem {
             category: "Credentials".into(),
             name: "ElevenLabs API Key".into(),
-            status: if elevenlabs_key_present { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
-            message: if elevenlabs_key_present { "Present in environment / Credential Manager" } else { "Not set (falls back to local Windows SAPI / Mock TTS)" }.into(),
-            remedy: if elevenlabs_key_present { None } else { Some("Configure ELEVENLABS_API_KEY in Console Settings if cloud TTS is desired".into()) },
+            status: if elevenlabs_key_present {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
+            message: if elevenlabs_key_present {
+                "Present in environment / Credential Manager"
+            } else {
+                "Not set (falls back to local Windows SAPI / Mock TTS)"
+            }
+            .into(),
+            remedy: if elevenlabs_key_present {
+                None
+            } else {
+                Some(
+                    "Configure ELEVENLABS_API_KEY in Console Settings if cloud TTS is desired"
+                        .into(),
+                )
+            },
         });
 
         let tg_token_present = std::env::var("TELEGRAM_BOT_TOKEN").is_ok();
         report.add(DiagnosticItem {
             category: "Credentials".into(),
             name: "Telegram Bot Token".into(),
-            status: if tg_token_present { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
-            message: if tg_token_present { "Present in environment / settings" } else { "Not set (remote control disabled)" }.into(),
-            remedy: if tg_token_present { None } else { Some("Provide bot token in Console Settings if remote is desired".into()) },
+            status: if tg_token_present {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
+            message: if tg_token_present {
+                "Present in environment / settings"
+            } else {
+                "Not set (remote control disabled)"
+            }
+            .into(),
+            remedy: if tg_token_present {
+                None
+            } else {
+                Some("Provide bot token in Console Settings if remote is desired".into())
+            },
         });
     }
 
     fn check_data_paths(report: &mut DoctorReport) {
         let paths = ruby_config::RubyPaths::resolve();
         let path_str = paths.workspace_dir.to_string_lossy();
-        let outside_repo = !path_str.contains("ruby-agent\\crates") && !path_str.contains("ruby-agent/crates");
+        let outside_repo =
+            !path_str.contains("ruby-agent\\crates") && !path_str.contains("ruby-agent/crates");
         report.add(DiagnosticItem {
             category: "Storage".into(),
             name: "Data Directory Isolation".into(),
-            status: if outside_repo { DiagnosticStatus::Pass } else { DiagnosticStatus::Fail },
-            message: format!("Resolved workspace directory: {}", paths.workspace_dir.display()),
-            remedy: if outside_repo { None } else { Some("Ensure RUBY_DATA_DIR or LOCALAPPDATA points outside repository".into()) },
+            status: if outside_repo {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Fail
+            },
+            message: format!(
+                "Resolved workspace directory: {}",
+                paths.workspace_dir.display()
+            ),
+            remedy: if outside_repo {
+                None
+            } else {
+                Some("Ensure RUBY_DATA_DIR or LOCALAPPDATA points outside repository".into())
+            },
         });
     }
 
@@ -168,13 +227,28 @@ impl RubyDoctor {
         report.add(DiagnosticItem {
             category: "Security".into(),
             name: "Computer Use Gating".into(),
-            status: if !cu_cfg.enabled || cu_cfg.dry_run { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
+            status: if !cu_cfg.enabled || cu_cfg.dry_run {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
             message: format!("enabled={}, dry_run={}", cu_cfg.enabled, cu_cfg.dry_run),
-            remedy: if cu_cfg.enabled && !cu_cfg.dry_run { Some("Ensure live Computer Use is intended; dry_run=true recommended for safety".into()) } else { None },
+            remedy: if cu_cfg.enabled && !cu_cfg.dry_run {
+                Some(
+                    "Ensure live Computer Use is intended; dry_run=true recommended for safety"
+                        .into(),
+                )
+            } else {
+                None
+            },
         });
 
         let paths = ruby_config::RubyPaths::resolve();
-        let remote_config_file = paths.workspace_dir.parent().unwrap_or(Path::new(".")).join("remote_config.json");
+        let remote_config_file = paths
+            .workspace_dir
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("remote_config.json");
         let allow_screenshots = if remote_config_file.exists() {
             std::fs::read_to_string(&remote_config_file)
                 .ok()
@@ -187,17 +261,37 @@ impl RubyDoctor {
         report.add(DiagnosticItem {
             category: "Security".into(),
             name: "Remote Screenshot Gating".into(),
-            status: if !allow_screenshots { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
+            status: if !allow_screenshots {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
             message: format!("allow_screenshots={}", allow_screenshots),
-            remedy: if allow_screenshots { Some("Verify screenshot authorization over unencrypted Telegram is desired".into()) } else { None },
+            remedy: if allow_screenshots {
+                Some("Verify screenshot authorization over unencrypted Telegram is desired".into())
+            } else {
+                None
+            },
         });
     }
 
     fn check_external_binaries(report: &mut DoctorReport) {
         let bins = [
-            ("git", "Version control operations & repo tools", "https://git-scm.com/"),
-            ("ffmpeg", "Screen recording (optional)", "https://ffmpeg.org/download.html"),
-            ("node", "Playwright sidecar execution", "https://nodejs.org/"),
+            (
+                "git",
+                "Version control operations & repo tools",
+                "https://git-scm.com/",
+            ),
+            (
+                "ffmpeg",
+                "Screen recording (optional)",
+                "https://ffmpeg.org/download.html",
+            ),
+            (
+                "node",
+                "Playwright sidecar execution",
+                "https://nodejs.org/",
+            ),
         ];
 
         for (bin, desc, link) in bins {
@@ -263,7 +357,8 @@ impl RubyDoctor {
 
     fn check_disk_space(report: &mut DoctorReport) {
         let paths = ruby_config::RubyPaths::resolve();
-        let exists = paths.workspace_dir.exists() || std::fs::create_dir_all(&paths.workspace_dir).is_ok();
+        let exists =
+            paths.workspace_dir.exists() || std::fs::create_dir_all(&paths.workspace_dir).is_ok();
         if !exists {
             report.add(DiagnosticItem {
                 category: "Storage".into(),
@@ -278,7 +373,12 @@ impl RubyDoctor {
         #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStrExt;
-            let wide: Vec<u16> = paths.workspace_dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            let wide: Vec<u16> = paths
+                .workspace_dir
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
             let mut free_bytes_avail: u64 = 0;
             let mut total_bytes: u64 = 0;
             let mut total_free: u64 = 0;
@@ -300,13 +400,24 @@ impl RubyDoctor {
             };
             if res != 0 {
                 let free_gb = free_bytes_avail as f64 / (1024.0 * 1024.0 * 1024.0);
-                let status = if free_gb >= 5.0 { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn };
-                let remedy = if free_gb < 5.0 { Some("Free up disk space on the data drive (< 5.0 GB remaining)".into()) } else { None };
+                let status = if free_gb >= 5.0 {
+                    DiagnosticStatus::Pass
+                } else {
+                    DiagnosticStatus::Warn
+                };
+                let remedy = if free_gb < 5.0 {
+                    Some("Free up disk space on the data drive (< 5.0 GB remaining)".into())
+                } else {
+                    None
+                };
                 report.add(DiagnosticItem {
                     category: "Storage".into(),
                     name: "Disk Space".into(),
                     status,
-                    message: format!("{:.1} GB free on data drive (minimum 5.0 GB recommended)", free_gb),
+                    message: format!(
+                        "{:.1} GB free on data drive (minimum 5.0 GB recommended)",
+                        free_gb
+                    ),
                     remedy,
                 });
                 return;
@@ -325,15 +436,24 @@ impl RubyDoctor {
     async fn check_network_connectivity(report: &mut DoctorReport) {
         let tg_res = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            tokio::net::TcpStream::connect("api.telegram.org:443")
-        ).await;
+            tokio::net::TcpStream::connect("api.telegram.org:443"),
+        )
+        .await;
         let ok = tg_res.is_ok() && tg_res.unwrap().is_ok();
 
         report.add(DiagnosticItem {
             category: "Network".into(),
             name: "Telegram API Endpoint".into(),
-            status: if ok { DiagnosticStatus::Pass } else { DiagnosticStatus::Warn },
-            message: if ok { "Reachable (TCP 443 handshake successful)".into() } else { "Unreachable".into() },
+            status: if ok {
+                DiagnosticStatus::Pass
+            } else {
+                DiagnosticStatus::Warn
+            },
+            message: if ok {
+                "Reachable (TCP 443 handshake successful)".into()
+            } else {
+                "Unreachable".into()
+            },
             remedy: Some("Verify internet connection or check firewall proxy rules".into()),
         });
     }

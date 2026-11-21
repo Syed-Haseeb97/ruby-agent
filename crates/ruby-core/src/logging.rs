@@ -35,7 +35,9 @@ impl RedactedJsonLogger {
         let _ = fs::create_dir_all(&log_dir);
         let logger = Self {
             log_dir: log_dir.clone(),
-            recent_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_LOG_BUFFER_CAPACITY))),
+            recent_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(
+                RECENT_LOG_BUFFER_CAPACITY,
+            ))),
             patterns: Arc::new(Self::compile_redaction_patterns()),
         };
         logger.prune_old_logs(DEFAULT_LOG_RETENTION_DAYS);
@@ -63,7 +65,10 @@ impl RedactedJsonLogger {
             // Tagged [SECRET]...[/SECRET]
             Regex::new(r"\[SECRET\].*?\[/SECRET\]").unwrap(),
             // Hardcoded generic secret assignments
-            Regex::new(r#"(?i)(?:api_key|apikey|secret|token)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]"#).unwrap(),
+            Regex::new(
+                r#"(?i)(?:api_key|apikey|secret|token)\s*[:=]\s*['"][A-Za-z0-9_\-]{16,}['"]"#,
+            )
+            .unwrap(),
         ]
     }
 
@@ -105,7 +110,11 @@ impl RedactedJsonLogger {
         let filename = format!("ruby-{}.log", now.format("%Y-%m-%d"));
         let file_path = self.log_dir.join(filename);
 
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&file_path) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+        {
             if let Ok(json_line) = serde_json::to_string(&entry) {
                 let _ = writeln!(file, "{}", json_line);
             }
@@ -183,7 +192,10 @@ mod tests {
 
         // Construct fake secrets via concatenation to avoid matching static repository scanners
         let fake_ghp = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
-        let fake_pat = format!("{}{}", "github_pat_", "11ABCD_1234567890abcdefghijklmnopqrstuvwxyz");
+        let fake_pat = format!(
+            "{}{}",
+            "github_pat_", "11ABCD_1234567890abcdefghijklmnopqrstuvwxyz"
+        );
         let fake_aiza = format!("{}{}", "AIza", "SyD1234567890abcdefghijklmnopqrstuv");
         let fake_sk = format!("{}{}", "sk-", "1234567890abcdefghijklmnopqrstuv");
         let fake_tg = format!("{}{}", "123456789:", "ABCDefghIJKLmnopQRSTuvwxyz123456789");
@@ -220,8 +232,12 @@ mod tests {
         assert_eq!(logs[0].message, "System initialized cleanly.");
 
         // Create an old log file (20 days ago) and a recent one (2 days ago)
-        let old_date = (Utc::now() - chrono::Duration::days(20)).format("%Y-%m-%d").to_string();
-        let recent_date = (Utc::now() - chrono::Duration::days(2)).format("%Y-%m-%d").to_string();
+        let old_date = (Utc::now() - chrono::Duration::days(20))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recent_date = (Utc::now() - chrono::Duration::days(2))
+            .format("%Y-%m-%d")
+            .to_string();
 
         let old_file = temp.path().join(format!("ruby-{}.log", old_date));
         let recent_file = temp.path().join(format!("ruby-{}.log", recent_date));
@@ -251,10 +267,26 @@ mod tests {
             let raw = format!("{} {} {}", prefix, fake_token, suffix);
 
             let clean = logger.sanitize(&raw);
-            assert!(!clean.contains(&fake_token), "Iteration {} leaked secret!", i);
-            assert!(clean.contains("[REDACTED]"), "Iteration {} missing [REDACTED]!", i);
-            assert!(clean.contains(&prefix), "Iteration {} lost non-secret prefix!", i);
-            assert!(clean.contains(&suffix), "Iteration {} lost non-secret suffix!", i);
+            assert!(
+                !clean.contains(&fake_token),
+                "Iteration {} leaked secret!",
+                i
+            );
+            assert!(
+                clean.contains("[REDACTED]"),
+                "Iteration {} missing [REDACTED]!",
+                i
+            );
+            assert!(
+                clean.contains(&prefix),
+                "Iteration {} lost non-secret prefix!",
+                i
+            );
+            assert!(
+                clean.contains(&suffix),
+                "Iteration {} lost non-secret suffix!",
+                i
+            );
         }
     }
 
@@ -309,11 +341,18 @@ mod tests {
         struct SimpleRng(u64);
         impl SimpleRng {
             fn next_u32(&mut self) -> u32 {
-                self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (self.0 >> 32) as u32
             }
             fn next_range(&mut self, min: u32, max: u32) -> u32 {
-                if min >= max { min } else { min + (self.next_u32() % (max - min)) }
+                if min >= max {
+                    min
+                } else {
+                    min + (self.next_u32() % (max - min))
+                }
             }
         }
 
@@ -335,7 +374,8 @@ mod tests {
             for c in raw_token.chars() {
                 split_token.push(c);
                 if rng.next_range(0, 3) == 0 {
-                    let zw = zero_width_chars[rng.next_range(0, zero_width_chars.len() as u32) as usize];
+                    let zw =
+                        zero_width_chars[rng.next_range(0, zero_width_chars.len() as u32) as usize];
                     split_token.push(zw);
                 }
             }
@@ -349,10 +389,21 @@ mod tests {
 
             // Assert raw secret strings never leak
             let raw_prefix = &raw_token[..15];
-            assert!(!clean.contains(raw_prefix), "Case {} leaked token prefix! Raw: {}, Clean: {}", i, raw_token, clean);
+            assert!(
+                !clean.contains(raw_prefix),
+                "Case {} leaked token prefix! Raw: {}, Clean: {}",
+                i,
+                raw_token,
+                clean
+            );
 
             // Assert redaction marker is present
-            assert!(clean.contains("[REDACTED]"), "Case {} missing [REDACTED] marker! Got: {}", i, clean);
+            assert!(
+                clean.contains("[REDACTED]"),
+                "Case {} missing [REDACTED] marker! Got: {}",
+                i,
+                clean
+            );
         }
     }
 }

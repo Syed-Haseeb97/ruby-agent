@@ -112,7 +112,11 @@ impl ScreenRecorder {
     }
 
     /// Builds the hardened ffmpeg argument vector: strictly video-only (-an) with optional segmenting.
-    pub fn build_ffmpeg_args(framerate: u32, segment_seconds: u32, output_path: &Path) -> Vec<String> {
+    pub fn build_ffmpeg_args(
+        framerate: u32,
+        segment_seconds: u32,
+        output_path: &Path,
+    ) -> Vec<String> {
         let mut args = vec![
             "-y".to_string(),
             "-f".to_string(),
@@ -423,14 +427,21 @@ mod tests {
 
         // Simulate 250ms tick with simulated clock
         let tick_interval = std::time::Duration::from_millis(250);
-        assert!(tick_interval <= std::time::Duration::from_millis(500), "Tick heartbeat must be <= 500ms");
+        assert!(
+            tick_interval <= std::time::Duration::from_millis(500),
+            "Tick heartbeat must be <= 500ms"
+        );
 
-        recorder.set_visible_windows_override(vec![
-            ("SensitiveBank - Personal Portal".into(), "browser.exe".into())
-        ]);
+        recorder.set_visible_windows_override(vec![(
+            "SensitiveBank - Personal Portal".into(),
+            "browser.exe".into(),
+        )]);
         let res = recorder.check_security_denylist_tick();
         assert!(res.is_err());
-        assert!(!out_file.exists(), "Segment must be purged on tick heartbeat");
+        assert!(
+            !out_file.exists(),
+            "Segment must be purged on tick heartbeat"
+        );
     }
 
     #[test]
@@ -462,8 +473,15 @@ mod tests {
         assert!(f1.exists());
 
         // Delete with valid 6-digit code succeeds
-        let code = confirmations.register_action("recorder", "delete_all", serde_json::json!({}), "Delete all recordings");
-        let del_res = recorder.delete_all_recordings_with_confirmation(&code).unwrap();
+        let code = confirmations.register_action(
+            "recorder",
+            "delete_all",
+            serde_json::json!({}),
+            "Delete all recordings",
+        );
+        let del_res = recorder
+            .delete_all_recordings_with_confirmation(&code)
+            .unwrap();
         assert_eq!(del_res, 3);
         assert!(!f1.exists());
         assert!(!f2.exists());
@@ -474,9 +492,14 @@ mod tests {
         std::fs::write(&old_f, b"old_rec").unwrap();
         assert!(old_f.exists());
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let cleaned = recorder.cleanup_expired_recordings(std::time::Duration::from_millis(10)).unwrap();
+        let cleaned = recorder
+            .cleanup_expired_recordings(std::time::Duration::from_millis(10))
+            .unwrap();
         assert_eq!(cleaned, 1);
-        assert!(!old_f.exists(), "Expired recording past retention window must be automatically deleted");
+        assert!(
+            !old_f.exists(),
+            "Expired recording past retention window must be automatically deleted"
+        );
     }
 
     #[test]

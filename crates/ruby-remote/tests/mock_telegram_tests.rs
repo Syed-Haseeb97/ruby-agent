@@ -1892,7 +1892,10 @@ async fn test_telegram_remote_quit_command_flow() {
 
     let sent2 = mock.sent_messages.lock().unwrap();
     assert_eq!(sent2.len(), 2);
-    assert!(sent2[1]["text"].as_str().unwrap().contains("shutting down gracefully"));
+    assert!(sent2[1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("shutting down gracefully"));
 }
 
 // 13. Session lock awareness: pauses Mode A, notifies Telegram, Mode B continues
@@ -1933,25 +1936,41 @@ async fn test_session_lock_pauses_mode_a_while_mode_b_continues() {
     let recent = task_mgr.get_recent_tasks(5);
     let paused_task = recent.iter().find(|t| t.id == task.id).unwrap();
     assert_eq!(paused_task.state, TaskState::NeedsInput);
-    assert!(paused_task.result.as_ref().unwrap().contains("Desktop session locked"));
+    assert!(paused_task
+        .result
+        .as_ref()
+        .unwrap()
+        .contains("Desktop session locked"));
 
     // User should have received notification on paired device
     let sent = mock.sent_messages.lock().unwrap();
     assert_eq!(sent.len(), 1);
-    assert!(sent[0]["text"].as_str().unwrap().contains("Desktop session locked: Mode A autonomous task paused"));
+    assert!(sent[0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Desktop session locked: Mode A autonomous task paused"));
 }
 
 // 14. Telegram error classification (409 Conflict, 429 RateLimit, 401 Revoked)
 #[test]
 fn test_telegram_error_classification_types() {
     let err409 = ruby_remote::types::RemoteError::Conflict409;
-    assert_eq!(err409.to_string(), "Telegram 409 Conflict: Another poller is active");
+    assert_eq!(
+        err409.to_string(),
+        "Telegram 409 Conflict: Another poller is active"
+    );
 
     let err429 = ruby_remote::types::RemoteError::RateLimited429(30);
-    assert_eq!(err429.to_string(), "Telegram 429 Rate Limit: retry after 30 seconds");
+    assert_eq!(
+        err429.to_string(),
+        "Telegram 429 Rate Limit: retry after 30 seconds"
+    );
 
     let err401 = ruby_remote::types::RemoteError::TokenRevoked;
-    assert_eq!(err401.to_string(), "Telegram 401 Unauthorized: Token revoked or invalid");
+    assert_eq!(
+        err401.to_string(),
+        "Telegram 401 Unauthorized: Token revoked or invalid"
+    );
 }
 
 // 15. Telegram /status includes rich metrics & /logs redacts secrets
@@ -2004,7 +2023,10 @@ async fn test_telegram_logs_command_redaction_and_metrics_status() {
             "text": "/status"
         }
     });
-    let handled = adapter.process_update(status_update, now_secs).await.unwrap();
+    let handled = adapter
+        .process_update(status_update, now_secs)
+        .await
+        .unwrap();
     assert_eq!(handled, Some(1));
 
     let sent = mock.sent_messages.lock().unwrap().clone();
@@ -2018,7 +2040,11 @@ async fn test_telegram_logs_command_redaction_and_metrics_status() {
     let log_dir = temp_dir.path().join("logs");
     let logger = ruby_core::RedactedJsonLogger::new(log_dir.clone());
     let fake_token = format!("{}{}", "ghp_", "1234567890abcdefghijklmnopqrstuvwxyz");
-    logger.log("WARN", "auth_module", &format!("Token rejected: {}", fake_token));
+    logger.log(
+        "WARN",
+        "auth_module",
+        &format!("Token rejected: {}", fake_token),
+    );
 
     mock.sent_messages.lock().unwrap().clear();
     let logs_update = serde_json::json!({
@@ -2037,7 +2063,10 @@ async fn test_telegram_logs_command_redaction_and_metrics_status() {
     let sent2 = mock.sent_messages.lock().unwrap().clone();
     assert_eq!(sent2.len(), 1);
     let logs_text = sent2[0]["text"].as_str().unwrap();
-    assert!(!logs_text.contains(&fake_token), "Telegram /logs must NEVER leak secret tokens");
+    assert!(
+        !logs_text.contains(&fake_token),
+        "Telegram /logs must NEVER leak secret tokens"
+    );
 }
 
 // 12. Opt-in live test: sends one message to paired chat and prints reply latency

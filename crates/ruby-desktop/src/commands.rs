@@ -1047,11 +1047,9 @@ pub struct AppConfigPayload {
 impl Default for AppConfigPayload {
     fn default() -> Self {
         Self {
-            allowed_roots: vec![
-                std::env::var("USERPROFILE")
-                    .map(|p| format!("{}\\projects", p))
-                    .unwrap_or_else(|_| "D:\\projects".to_string())
-            ],
+            allowed_roots: vec![std::env::var("USERPROFILE")
+                .map(|p| format!("{}\\projects", p))
+                .unwrap_or_else(|_| "D:\\projects".to_string())],
             computer_use_enabled: false,
             computer_use_dry_run: true,
             advanced_shell_enabled: false,
@@ -1078,14 +1076,20 @@ pub struct SaveConfigResult {
 }
 
 #[tauri::command]
-pub async fn run_doctor(opt_in_network: Option<bool>) -> Result<ruby_core::doctor::DoctorReport, String> {
+pub async fn run_doctor(
+    opt_in_network: Option<bool>,
+) -> Result<ruby_core::doctor::DoctorReport, String> {
     Ok(ruby_core::doctor::RubyDoctor::run_diagnostics(opt_in_network.unwrap_or(false)).await)
 }
 
 #[tauri::command]
 pub fn get_app_config() -> Result<AppConfigPayload, String> {
     let paths = ruby_config::RubyPaths::resolve();
-    let config_path = paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("config.json");
+    let config_path = paths
+        .workspace_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("config.json");
     if config_path.exists() {
         let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
         serde_json::from_str(&content).map_err(|e| e.to_string())
@@ -1114,14 +1118,24 @@ pub fn save_app_config(
     let mut warning = None;
     for root in &config.allowed_roots {
         let trimmed = root.trim();
-        if trimmed == "C:\\" || trimmed == "C:/" || trimmed == "D:\\" || trimmed == "D:/" || trimmed == "/" || trimmed == "\\" || (trimmed.len() <= 3 && trimmed.ends_with(':')) {
+        if trimmed == "C:\\"
+            || trimmed == "C:/"
+            || trimmed == "D:\\"
+            || trimmed == "D:/"
+            || trimmed == "/"
+            || trimmed == "\\"
+            || (trimmed.len() <= 3 && trimmed.ends_with(':'))
+        {
             warning = Some(format!("Warning: Allowed root '{}' covers an entire drive. Specifying a dedicated project folder like 'D:\\projects' is strongly recommended for security.", trimmed));
             break;
         }
     }
 
     let paths = ruby_config::RubyPaths::resolve();
-    let config_dir = paths.workspace_dir.parent().unwrap_or(std::path::Path::new("."));
+    let config_dir = paths
+        .workspace_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
     std::fs::create_dir_all(config_dir).map_err(|e| e.to_string())?;
     let config_path = config_dir.join("config.json");
     let content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -1136,7 +1150,8 @@ pub fn save_app_config(
 #[tauri::command]
 pub fn get_secrets_status() -> SecretsStatus {
     SecretsStatus {
-        gemini_api_key_set: std::env::var("GEMINI_API_KEY").is_ok() || std::env::var("GOOGLE_API_KEY").is_ok(),
+        gemini_api_key_set: std::env::var("GEMINI_API_KEY").is_ok()
+            || std::env::var("GOOGLE_API_KEY").is_ok(),
         elevenlabs_api_key_set: std::env::var("ELEVENLABS_API_KEY").is_ok(),
         telegram_bot_token_set: std::env::var("TELEGRAM_BOT_TOKEN").is_ok(),
     }
@@ -1145,7 +1160,11 @@ pub fn get_secrets_status() -> SecretsStatus {
 #[tauri::command]
 pub fn is_first_run() -> bool {
     let paths = ruby_config::RubyPaths::resolve();
-    let config_path = paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("config.json");
+    let config_path = paths
+        .workspace_dir
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("config.json");
     !config_path.exists()
 }
 
@@ -1155,7 +1174,9 @@ pub fn get_recent_logs(
     level: Option<String>,
     limit: Option<usize>,
 ) -> Vec<ruby_core::LogEntry> {
-    state.logger.get_recent_logs(level.as_deref(), limit.unwrap_or(50))
+    state
+        .logger
+        .get_recent_logs(level.as_deref(), limit.unwrap_or(50))
 }
 
 #[tauri::command]
@@ -1169,10 +1190,9 @@ pub fn delete_recordings_core(
     confirmation_code: Option<String>,
 ) -> Result<usize, String> {
     match confirmation_code {
-        Some(code) => {
-            recorder.delete_all_recordings_with_confirmation(&code)
-                .map_err(|e| e.to_string())
-        }
+        Some(code) => recorder
+            .delete_all_recordings_with_confirmation(&code)
+            .map_err(|e| e.to_string()),
         None => {
             let code = conf_mgr.register_action(
                 "recorder",
@@ -1418,7 +1438,11 @@ mod voice_live_tests {
 
         // Row 1: Mode A Tap
         let cu_token = KillSwitchToken::new();
-        let voice_mgr = VoiceLiveManager::new(Arc::new(NullAudioOutput), Arc::new(MockToolDispatcher::default()), None);
+        let voice_mgr = VoiceLiveManager::new(
+            Arc::new(NullAudioOutput),
+            Arc::new(MockToolDispatcher::default()),
+            None,
+        );
         let action = dispatch_esc_hierarchy(true, &cu_token, &voice_mgr, async {}).await;
         assert_eq!(action, EscHierarchyAction::ModeAKillSwitch);
         assert!(cu_token.is_cancelled());
@@ -1430,7 +1454,10 @@ mod voice_live_tests {
         assert_ne!(voice_mgr.status(), VoiceLiveStatus::Idle);
         let action = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, async {}).await;
         assert_eq!(action, EscHierarchyAction::VoiceLiveStop);
-        assert!(voice_mgr.status() == VoiceLiveStatus::Stopping || voice_mgr.status() == VoiceLiveStatus::Idle);
+        assert!(
+            voice_mgr.status() == VoiceLiveStatus::Stopping
+                || voice_mgr.status() == VoiceLiveStatus::Idle
+        );
 
         // Row 3: Mode D Tap
         let cu_token = KillSwitchToken::new();
@@ -1440,7 +1467,8 @@ mod voice_live_tests {
             async move {
                 d.store(true, std::sync::atomic::Ordering::SeqCst);
             }
-        }).await;
+        })
+        .await;
         assert_eq!(action, EscHierarchyAction::DictationCancel);
         assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
 
@@ -1451,7 +1479,11 @@ mod voice_live_tests {
         let job = supervisor.submit("Background non-GUI task").await.unwrap();
         let action = dispatch_esc_hierarchy(false, &cu_token, &voice_mgr, async {}).await;
         assert_eq!(action, EscHierarchyAction::DictationCancel);
-        assert_ne!(supervisor.get_job(job.id).unwrap().unwrap().status, ruby_core::TaskStatus::Cancelled, "Esc tap must NOT cancel background jobs");
+        assert_ne!(
+            supervisor.get_job(job.id).unwrap().unwrap().status,
+            ruby_core::TaskStatus::Cancelled,
+            "Esc tap must NOT cancel background jobs"
+        );
 
         // Row 5: Esc-Hold Global Kill Switch on all states
         // Verifies hold cancels CU, stops Voice Live, cancels dictation, and cancels supervisor jobs while staying alive
@@ -1472,7 +1504,10 @@ mod voice_live_tests {
         let cancelled_jobs = supervisor.cancel_all_active();
 
         assert!(cu_token.is_cancelled());
-        assert!(voice_mgr5.status() == VoiceLiveStatus::Stopping || voice_mgr5.status() == VoiceLiveStatus::Idle);
+        assert!(
+            voice_mgr5.status() == VoiceLiveStatus::Stopping
+                || voice_mgr5.status() == VoiceLiveStatus::Idle
+        );
         assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(cancelled_jobs, 1);
         // Assert process stays RUNNING (test reaches here without exit)
@@ -1484,8 +1519,13 @@ mod voice_live_tests {
         let mut cfg = AppConfigPayload::default();
         cfg.computer_use_enabled = true;
         let res = save_app_config(cfg.clone(), None);
-        assert!(res.is_err(), "Must require confirmation when dangerous flag enabled");
-        assert!(res.unwrap_err().contains("requires explicit user confirmation"));
+        assert!(
+            res.is_err(),
+            "Must require confirmation when dangerous flag enabled"
+        );
+        assert!(res
+            .unwrap_err()
+            .contains("requires explicit user confirmation"));
 
         // With explicit confirmation, it succeeds
         let res_confirmed = save_app_config(cfg, Some(true));
@@ -1527,11 +1567,17 @@ mod voice_live_tests {
     #[test]
     fn test_observability_redacted_logger_and_metrics_ipc() {
         let temp = tempfile::tempdir().unwrap();
-        let logger = Arc::new(ruby_core::RedactedJsonLogger::new(temp.path().to_path_buf()));
+        let logger = Arc::new(ruby_core::RedactedJsonLogger::new(
+            temp.path().to_path_buf(),
+        ));
         let metrics = Arc::new(ruby_core::MetricsCollector::new());
 
         let fake_key = format!("{}{}", "sk-", "1234567890abcdefghijklmnopqrstuv");
-        logger.log("INFO", "test_worker", &format!("Worker initialized with key {}", fake_key));
+        logger.log(
+            "INFO",
+            "test_worker",
+            &format!("Worker initialized with key {}", fake_key),
+        );
 
         let logs = logger.get_recent_logs(None, 10);
         assert_eq!(logs.len(), 1);
@@ -1556,7 +1602,8 @@ mod voice_live_tests {
         let conf_mgr = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
         let mut cfg = ruby_actions::screen_recorder::ScreenRecordingConfig::default();
         cfg.output_dir = rec_dir.clone();
-        let recorder = ruby_actions::screen_recorder::ScreenRecorder::new(cfg, Arc::clone(&conf_mgr));
+        let recorder =
+            ruby_actions::screen_recorder::ScreenRecorder::new(cfg, Arc::clone(&conf_mgr));
 
         // 1. Without confirmation code -> returns Err requiring code, files remain
         let res_no_code = delete_recordings_core(&recorder, &conf_mgr, None);
@@ -1566,11 +1613,7 @@ mod voice_live_tests {
         assert!(f1.exists());
         assert!(f2.exists());
 
-        let code = err_msg
-            .split("Code: ")
-            .nth(1)
-            .unwrap()
-            .trim();
+        let code = err_msg.split("Code: ").nth(1).unwrap().trim();
         assert_eq!(code.len(), 6);
 
         // 2. With wrong code -> returns Err, files remain

@@ -1,6 +1,6 @@
 use ruby_policy::{
-    parse_ip_or_numeric_host, DefaultSecurityPolicy, DefaultToolSecurityPolicy,
-    SecurityPolicy, ToolSecurityPolicy,
+    parse_ip_or_numeric_host, DefaultSecurityPolicy, DefaultToolSecurityPolicy, SecurityPolicy,
+    ToolSecurityPolicy,
 };
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -16,7 +16,10 @@ impl SimpleRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
     }
 
@@ -113,7 +116,8 @@ fn test_fuzz_path_canonicalization_and_traversal_never_escapes_or_panics() {
         let mut raw_str = String::new();
 
         for i in 0..num_parts {
-            let part = traversal_components[rng.next_bounded(traversal_components.len() as u32) as usize];
+            let part =
+                traversal_components[rng.next_bounded(traversal_components.len() as u32) as usize];
             if i > 0 {
                 if rng.next_bounded(2) == 0 {
                     raw_str.push('/');
@@ -239,7 +243,13 @@ fn test_fuzz_url_validation_and_ssrf_rejections() {
             _ => ":80".to_string(),
         };
 
-        let raw_url = format!("{}://{}{}/test?query={}", scheme, host, port_str, rng.next_u32());
+        let raw_url = format!(
+            "{}://{}{}/test?query={}",
+            scheme,
+            host,
+            port_str,
+            rng.next_u32()
+        );
         let res = policy.validate_browser_url(&raw_url);
 
         // Disallowed schemes must ALWAYS fail

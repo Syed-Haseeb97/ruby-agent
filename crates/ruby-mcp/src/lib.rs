@@ -1271,7 +1271,11 @@ mod tests {
 
         // 4. Also verify normal tool execution result does not leak the pending code
         let search_res = manager
-            .execute_tool("memory", "search_memories", serde_json::json!({ "query": "Sensitive", "limit": 5 }))
+            .execute_tool(
+                "memory",
+                "search_memories",
+                serde_json::json!({ "query": "Sensitive", "limit": 5 }),
+            )
             .await
             .expect("Search memories must succeed");
         let search_str = search_res.to_string();

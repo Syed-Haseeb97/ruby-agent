@@ -558,9 +558,7 @@ impl TelegramAdapter {
                         let guard = self.bg_supervisor.lock().unwrap();
                         if let Some(supervisor) = guard.as_ref() {
                             ruby_core::tasks::handle_background_command(
-                                supervisor,
-                                "/logs",
-                                trimmed,
+                                supervisor, "/logs", trimmed,
                             )
                         } else {
                             "Mode B Background Supervisor is not initialized.".to_string()
@@ -570,15 +568,23 @@ impl TelegramAdapter {
                 } else {
                     let n = trimmed.parse::<usize>().unwrap_or(10).min(50);
                     let paths = ruby_config::RubyPaths::resolve();
-                    let log_dir = paths.workspace_dir.parent().unwrap_or(std::path::Path::new(".")).join("logs");
+                    let log_dir = paths
+                        .workspace_dir
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join("logs");
                     let logger = ruby_core::logging::RedactedJsonLogger::new(log_dir);
                     let recent = logger.get_recent_logs(None, n);
                     if recent.is_empty() {
                         "No system logs recorded yet.".to_string()
                     } else {
-                        let mut lines = vec![format!("📋 Last {} Redacted System Logs:", recent.len())];
+                        let mut lines =
+                            vec![format!("📋 Last {} Redacted System Logs:", recent.len())];
                         for e in recent {
-                            lines.push(format!("[{}] {} {}: {}", e.timestamp, e.level, e.target, e.message));
+                            lines.push(format!(
+                                "[{}] {} {}: {}",
+                                e.timestamp, e.level, e.target, e.message
+                            ));
                         }
                         lines.join("\n")
                     }
@@ -592,14 +598,16 @@ impl TelegramAdapter {
                         &redacted[..500.min(redacted.len())]
                     );
                     self.send_redacted_reply(chat_id, &preview).await?;
-                    let doc_name = format!("logs_{}.txt", if trimmed.is_empty() { "system" } else { trimmed });
+                    let doc_name = format!(
+                        "logs_{}.txt",
+                        if trimmed.is_empty() {
+                            "system"
+                        } else {
+                            trimmed
+                        }
+                    );
                     self.client
-                        .send_document(
-                            chat_id,
-                            &doc_name,
-                            redacted.as_bytes(),
-                            Some("Full logs"),
-                        )
+                        .send_document(chat_id, &doc_name, redacted.as_bytes(), Some("Full logs"))
                         .await?;
                 } else {
                     self.send_redacted_reply(chat_id, &redacted).await?;
@@ -756,12 +764,8 @@ impl TelegramAdapter {
                     .confirmation_mgr
                     .register_action("remote_quit", "Remote Ruby Application Shutdown");
                 let expires = crate::confirmation::CONFIRMATION_TTL.as_secs();
-                self.audit_logger.log_entry(
-                    sender_id,
-                    None,
-                    "quit",
-                    "pending_confirmation",
-                );
+                self.audit_logger
+                    .log_entry(sender_id, None, "quit", "pending_confirmation");
                 let prompt = format!(
                     "⚠️ Confirm remote Ruby application shutdown?\nNotice: This will terminate the Ruby process on the host machine.\nReply /yes {code} (expires in {expires}s) or /no to cancel."
                 );
@@ -791,8 +795,12 @@ impl TelegramAdapter {
                             if action.description == "remote_quit"
                                 || action.description == "Remote Ruby Application Shutdown"
                             {
-                                self.audit_logger
-                                    .log_entry(sender_id, None, "quit", "confirmed_shutdown");
+                                self.audit_logger.log_entry(
+                                    sender_id,
+                                    None,
+                                    "quit",
+                                    "confirmed_shutdown",
+                                );
                                 self.send_redacted_reply(
                                     chat_id,
                                     "🛑 Ruby application is shutting down gracefully. Goodbye.",
@@ -1120,11 +1128,16 @@ impl ChannelAdapter for TelegramAdapter {
                     }
                 }
                 Err(RemoteError::Conflict409) => {
-                    warn!("Telegram 409 Conflict: Another poller is active. Pausing polling for 15s.");
+                    warn!(
+                        "Telegram 409 Conflict: Another poller is active. Pausing polling for 15s."
+                    );
                     tokio::time::sleep(Duration::from_secs(15)).await;
                 }
                 Err(RemoteError::RateLimited429(retry_after)) => {
-                    warn!("Telegram 429 Too Many Requests: Rate limited; waiting {}s.", retry_after);
+                    warn!(
+                        "Telegram 429 Too Many Requests: Rate limited; waiting {}s.",
+                        retry_after
+                    );
                     tokio::time::sleep(Duration::from_secs(retry_after)).await;
                 }
                 Err(RemoteError::TokenRevoked) => {
@@ -1136,9 +1149,11 @@ impl ChannelAdapter for TelegramAdapter {
                     if !running.load(Ordering::SeqCst) {
                         break;
                     }
-                    let jitter_ms = (ruby_policy::UnifiedConfirmationManager::generate_secure_code_6_digits()
-                        .parse::<u32>()
-                        .unwrap_or(123) % 500) as u64;
+                    let jitter_ms =
+                        (ruby_policy::UnifiedConfirmationManager::generate_secure_code_6_digits()
+                            .parse::<u32>()
+                            .unwrap_or(123)
+                            % 500) as u64;
                     let sleep_dur = backoff + Duration::from_millis(jitter_ms);
                     warn!(
                         "Telegram getUpdates network error: {:?}; retrying in {:?}",

@@ -16,7 +16,10 @@ impl SimpleRng {
     }
 
     fn next_u32(&mut self) -> u32 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.state >> 32) as u32
     }
 
@@ -47,11 +50,37 @@ fn test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes() {
     let handler = PolicyGatedCommandHandler::new(policy, executor, conf);
 
     let prefixes = [
-        "list ", "ls ", "read ", "cat ", "head ", "fileinfo ", "sendfile ",
-        "git status ", "git log ", "git diff ", "gh pr list ", "gh issue list ",
-        "open ", "launch ", "close ", "settings ", "click ", "remind ", "startup ",
-        "/start ", "/pair ", "/status ", "/screen ", "/rec ", "/jobs ", "/cancel ",
-        "/logs ", "/stop ", "/quit ", "/confirm ", "/deny ",
+        "list ",
+        "ls ",
+        "read ",
+        "cat ",
+        "head ",
+        "fileinfo ",
+        "sendfile ",
+        "git status ",
+        "git log ",
+        "git diff ",
+        "gh pr list ",
+        "gh issue list ",
+        "open ",
+        "launch ",
+        "close ",
+        "settings ",
+        "click ",
+        "remind ",
+        "startup ",
+        "/start ",
+        "/pair ",
+        "/status ",
+        "/screen ",
+        "/rec ",
+        "/jobs ",
+        "/cancel ",
+        "/logs ",
+        "/stop ",
+        "/quit ",
+        "/confirm ",
+        "/deny ",
     ];
 
     let attack_payloads = [
@@ -76,7 +105,10 @@ fn test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes() {
         "invalid_mode",
         "\u{FF0E}\u{FF0E}/secret",
         "\u{FE52}\u{FE52}\\secret",
-        "CON", "PRN", "AUX", "NUL",
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
     ];
 
     // 1. Structured adversarial combinations
@@ -88,7 +120,10 @@ fn test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes() {
                 PolicyDecision::Allowed(act) => {
                     // If allowed, ensure it never targets outside the root
                     match act {
-                        LocalAction::ListFolder(p) | LocalAction::ReadFileHead { path: p, .. } | LocalAction::SendFile { path: p, .. } | LocalAction::FileInfo(p) => {
+                        LocalAction::ListFolder(p)
+                        | LocalAction::ReadFileHead { path: p, .. }
+                        | LocalAction::SendFile { path: p, .. }
+                        | LocalAction::FileInfo(p) => {
                             assert!(
                                 PathBuf::from(&p).starts_with(&root),
                                 "Allowed action escaped root: {:?} for cmd {:?}",
@@ -108,9 +143,9 @@ fn test_fuzz_telegram_instruction_evaluator_never_panics_or_escapes() {
     // 2. Randomized generative fuzzing: 5,000 iterations
     let mut rng = SimpleRng::new(0x9876_5432_10FE_DCBA);
     let tokens = [
-        " ", "/", "\\", ".", "..", "\0", "\n", "\r", "%00", "%2e", ";", "&", "|", "$", "`",
-        "a", "B", "1", "9", "test", "root", "repo", "owner", "http", "https", "cmd", "sh",
-        "🦀", "мир", "🌟",
+        " ", "/", "\\", ".", "..", "\0", "\n", "\r", "%00", "%2e", ";", "&", "|", "$", "`", "a",
+        "B", "1", "9", "test", "root", "repo", "owner", "http", "https", "cmd", "sh", "🦀", "мир",
+        "🌟",
     ];
 
     for _ in 0..5000 {

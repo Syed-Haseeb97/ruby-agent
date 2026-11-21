@@ -474,8 +474,16 @@ impl ActionExecutor for AllowlistedActionExecutor {
             LocalAction::MediaControl(cmd) => {
                 let cleaned = cmd.trim().to_ascii_lowercase();
                 let allowed = [
-                    "play", "pause", "play_pause", "next", "prev", "previous", "stop",
-                    "mute", "volume_up", "volume_down",
+                    "play",
+                    "pause",
+                    "play_pause",
+                    "next",
+                    "prev",
+                    "previous",
+                    "stop",
+                    "mute",
+                    "volume_up",
+                    "volume_down",
                 ];
                 if !allowed.contains(&cleaned.as_str()) {
                     return Err(ActionError::Disallowed(format!(
@@ -805,15 +813,35 @@ mod tests {
         let executor = AllowlistedActionExecutor;
 
         // Approved commands
-        assert!(executor.execute(LocalAction::MediaControl("play_pause".into())).await.is_ok());
-        assert!(executor.execute(LocalAction::MediaControl("next".into())).await.is_ok());
-        assert!(executor.execute(LocalAction::MediaControl("prev".into())).await.is_ok());
-        assert!(executor.execute(LocalAction::MediaControl("stop".into())).await.is_ok());
-        assert!(executor.execute(LocalAction::MediaControl("mute".into())).await.is_ok());
-        assert!(executor.execute(LocalAction::MediaControl("volume_up".into())).await.is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("play_pause".into()))
+            .await
+            .is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("next".into()))
+            .await
+            .is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("prev".into()))
+            .await
+            .is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("stop".into()))
+            .await
+            .is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("mute".into()))
+            .await
+            .is_ok());
+        assert!(executor
+            .execute(LocalAction::MediaControl("volume_up".into()))
+            .await
+            .is_ok());
 
         // Disallowed command
-        let bad = executor.execute(LocalAction::MediaControl("eject_cdrom".into())).await;
+        let bad = executor
+            .execute(LocalAction::MediaControl("eject_cdrom".into()))
+            .await;
         assert!(bad.is_err());
         assert!(matches!(bad.unwrap_err(), ActionError::Disallowed(_)));
     }
