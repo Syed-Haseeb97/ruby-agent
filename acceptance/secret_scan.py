@@ -3,14 +3,16 @@ import re
 import os
 import sys
 
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Scan mode: either staged files (default), all repository files (--all), or explicit file paths
 if len(sys.argv) > 1 and sys.argv[1] == "--all":
-    proc = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=r"D:\projects\ruby-agent")
+    proc = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=repo_root)
     files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
 elif len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
     files = sys.argv[1:]
 else:
-    proc = subprocess.run(["git", "diff", "--cached", "--name-only"], capture_output=True, text=True, cwd=r"D:\projects\ruby-agent")
+    proc = subprocess.run(["git", "diff", "--cached", "--name-only"], capture_output=True, text=True, cwd=repo_root)
     files = [f.strip() for f in proc.stdout.splitlines() if f.strip()]
 
 secret_patterns = [
@@ -32,7 +34,7 @@ for f in files:
     if "playwright_profile" in f.lower() or f.lower().endswith(".db"):
         found_secrets.append((f, "Forbidden Private Data / Database File in Git", 1))
 
-    full_path = f if os.path.isabs(f) else os.path.join(r"D:\projects\ruby-agent", f)
+    full_path = f if os.path.isabs(f) else os.path.join(repo_root, f)
     if not os.path.isfile(full_path):
         continue
     # Skip binary image files
