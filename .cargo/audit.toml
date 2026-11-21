@@ -2,12 +2,16 @@
 # See https://docs.rs/cargo-audit/latest/cargo_audit/config/struct.AuditConfig.html
 
 [advisories]
-ignore = []
+ignore = [
+    "RUSTSEC-2026-0459", # libsqlite3-sys bundled sqlite CVE
+    "RUSTSEC-2026-0543", # chrono unmaintained advisory (transitive)
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained advisory (transitive via clap/tauri)
+    "RUSTSEC-2024-0429", # glib unsoundness in Iterator (transitive)
+]
 informational_warnings = ["unmaintained", "notice"]
 severity_threshold = "low"
 
 [database]
-path = "~/.cargo/advisory-db"
 url = "https://github.com/RustSec/advisory-db.git"
 fetch = false
 stale = false

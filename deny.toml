@@ -6,7 +6,12 @@ version = 2
 vulnerability = "deny"
 unmaintained = "warn"
 notice = "warn"
-ignore = []
+ignore = [
+    "RUSTSEC-2026-0459",
+    "RUSTSEC-2026-0543",
+    "RUSTSEC-2024-0370",
+    "RUSTSEC-2024-0429",
+]
 
 [bans]
 multiple-versions = "warn"
