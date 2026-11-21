@@ -29,7 +29,8 @@ def test_negative_secret_scan():
         ("playwright_profile_test", "profile_data", "Forbidden Private Data / Database File in Git"),
     ]
 
-    scanner_path = os.path.join(r"D:\projects\ruby-agent", "acceptance", "secret_scan.py")
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    scanner_path = os.path.join(repo_root, "acceptance", "secret_scan.py")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         for fname, content, expected_desc in fixtures:
@@ -42,7 +43,7 @@ def test_negative_secret_scan():
                 [sys.executable, scanner_path, file_path],
                 capture_output=True,
                 text=True,
-                cwd=r"D:\projects\ruby-agent"
+                cwd=repo_root
             )
 
             # Assert failure return code
