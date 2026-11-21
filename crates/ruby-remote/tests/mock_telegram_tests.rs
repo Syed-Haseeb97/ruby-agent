@@ -1863,12 +1863,13 @@ async fn test_telegram_remote_quit_command_flow() {
     });
     adapter.process_update(quit_update, now_secs).await.unwrap();
 
-    let sent = mock.sent_messages.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    let prompt_text = sent[0]["text"].as_str().unwrap();
-    assert!(prompt_text.contains("Confirm remote Ruby application shutdown"));
-    assert!(prompt_text.contains("/yes"));
-    drop(sent);
+    {
+        let sent = mock.sent_messages.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let prompt_text = sent[0]["text"].as_str().unwrap();
+        assert!(prompt_text.contains("Confirm remote Ruby application shutdown"));
+        assert!(prompt_text.contains("/yes"));
+    }
 
     // Extract confirmation code
     let pending = confirmation_mgr

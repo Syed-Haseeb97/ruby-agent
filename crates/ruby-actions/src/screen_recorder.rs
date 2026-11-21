@@ -244,10 +244,8 @@ impl ScreenRecorder {
                     if let Ok(meta) = entry.metadata() {
                         if let Ok(modified) = meta.modified() {
                             if let Ok(elapsed) = now.duration_since(modified) {
-                                if elapsed > max_age {
-                                    if std::fs::remove_file(&path).is_ok() {
-                                        count += 1;
-                                    }
+                                if elapsed > max_age && std::fs::remove_file(&path).is_ok() {
+                                    count += 1;
                                 }
                             }
                         }
@@ -274,10 +272,8 @@ impl ScreenRecorder {
         if let Ok(entries) = std::fs::read_dir(&self.config.output_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() {
-                    if std::fs::remove_file(&path).is_ok() {
-                        deleted += 1;
-                    }
+                if path.is_file() && std::fs::remove_file(&path).is_ok() {
+                    deleted += 1;
                 }
             }
         }

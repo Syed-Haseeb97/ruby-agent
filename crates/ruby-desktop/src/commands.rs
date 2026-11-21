@@ -1510,14 +1510,14 @@ mod voice_live_tests {
         );
         assert!(dictation_cancelled.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(cancelled_jobs, 1);
-        // Assert process stays RUNNING (test reaches here without exit)
-        assert!(true, "Application stays running after kill switch");
     }
 
     #[test]
     fn test_save_app_config_requires_confirmation_for_dangerous_flags() {
-        let mut cfg = AppConfigPayload::default();
-        cfg.computer_use_enabled = true;
+        let cfg = AppConfigPayload {
+            computer_use_enabled: true,
+            ..Default::default()
+        };
         let res = save_app_config(cfg.clone(), None);
         assert!(
             res.is_err(),
@@ -1534,8 +1534,10 @@ mod voice_live_tests {
 
     #[test]
     fn test_save_app_config_warns_on_whole_drive_root() {
-        let mut cfg = AppConfigPayload::default();
-        cfg.allowed_roots = vec!["D:\\".to_string()];
+        let cfg = AppConfigPayload {
+            allowed_roots: vec!["D:\\".to_string()],
+            ..Default::default()
+        };
         let res = save_app_config(cfg, Some(false)).expect("should save with warning");
         assert!(res.warning.is_some());
         assert!(res.warning.unwrap().contains("covers an entire drive"));
@@ -1600,8 +1602,10 @@ mod voice_live_tests {
         std::fs::write(&f2, b"segment2").unwrap();
 
         let conf_mgr = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
-        let mut cfg = ruby_actions::screen_recorder::ScreenRecordingConfig::default();
-        cfg.output_dir = rec_dir.clone();
+        let cfg = ruby_actions::screen_recorder::ScreenRecordingConfig {
+            output_dir: rec_dir.clone(),
+            ..Default::default()
+        };
         let recorder =
             ruby_actions::screen_recorder::ScreenRecorder::new(cfg, Arc::clone(&conf_mgr));
 

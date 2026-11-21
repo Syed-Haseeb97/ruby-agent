@@ -209,7 +209,7 @@ async fn test_e2e_scenario_e3_mode_a_denylist_resume() {
 
     // User replies to resume
     let user_reply = "Closed window, please resume";
-    assert!(!user_reply.is_empty());
+    assert_eq!(user_reply, "Closed window, please resume");
 
     task_mgr.update_task_state(&task.id, TaskState::Running, None, None);
     task_mgr.update_task_state(

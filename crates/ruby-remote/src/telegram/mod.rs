@@ -1052,9 +1052,8 @@ impl TelegramAdapter {
                         );
                     }
                 }
-                let config_guard = self.config.lock().unwrap();
-                if let Some(paired_id) = config_guard.paired_user_id {
-                    drop(config_guard);
+                let paired_id = self.config.lock().unwrap().paired_user_id;
+                if let Some(paired_id) = paired_id {
                     self.send_redacted_reply(
                         paired_id,
                         "⚠️ Desktop session locked: Mode A autonomous task paused for security. Mode B background tasks continue running.",
