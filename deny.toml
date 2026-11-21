@@ -3,9 +3,7 @@
 
 [advisories]
 version = 2
-vulnerability = "deny"
 unmaintained = "none"
-notice = "none"
 ignore = [
     "RUSTSEC-2026-0459",
     "RUSTSEC-2026-0543",
