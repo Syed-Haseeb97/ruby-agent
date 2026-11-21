@@ -556,6 +556,16 @@ async fn test_telegram_stop_command_stops_voice_live_manager() {
     adapter.process_update(stop_update, now_secs).await.unwrap();
 
     // Verify Idle
+    let _ = tokio::time::timeout(tokio::time::Duration::from_millis(500), async {
+        loop {
+            if voice_mgr.status() == ruby_core::voice_live::VoiceLiveStatus::Idle {
+                return;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
     assert_eq!(
         voice_mgr.status(),
         ruby_core::voice_live::VoiceLiveStatus::Idle
