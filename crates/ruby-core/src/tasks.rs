@@ -1110,6 +1110,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let conf_mgr = Arc::new(ruby_policy::UnifiedConfirmationManager::new());
         let backend = LocalToolBackend::new(temp.path().to_path_buf(), true)
+            .with_elevation_override(false)
             .with_confirmation_manager(conf_mgr.clone());
 
         // 1. Unconfirmed command execution triggers Requires confirmation
